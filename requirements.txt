@@ -1,0 +1,44 @@
+# SkinCheck backend (API-only) — core requirements.
+# Pinned on purpose: newer Starlette removed the old
+# TemplateResponse(name, context) style the monolith used, which made
+# every HTML page return 500 on a fresh install. The API-only backend
+# does not use templates at all, but the pins keep the whole stack
+# reproducible and are the versions actually tested here.
+fastapi==0.115.0
+starlette==0.38.6
+uvicorn>=0.30.0
+# jinja2 is NOT used by the API-only backend (no templates, no /static).
+# It is kept pinned below only so a future template-dependent import
+# does not silently pull a breaking version. It can be removed entirely
+# once the legacy controllers are deleted.
+jinja2==3.1.4
+python-dotenv>=1.0.1
+python-multipart>=0.0.9
+pydantic>=2.8.0
+httpx>=0.27.0
+SQLAlchemy>=2.0.0
+passlib[bcrypt]>=1.7.4
+itsdangerous>=2.1.0
+email-validator>=2.1.0
+Pillow>=10.0.0
+pymysql>=1.1.0
+cryptography>=41.0.0
+bcrypt>=4.0.0
+certifi>=2024.0.0
+numpy>=1.26.0
+
+# ---------------------------------------------------------------------------
+# Optional / lazy — NOT required to import or run the API.
+# These are only imported lazily inside service functions, so the app
+# imports and serves /api/v2 (auth, products, history, scan upload)
+# without them installed:
+# - tensorflow: only inside ai_service._load_model() (the .h5 model,
+#   which is not in this repo). Scan upload stores the image and
+#   creates a "processing" row; it does not run the model.
+# - opencv-python (cv2): only inside ai_service image functions.
+# - google-generativeai: only inside assistant / copilot services.
+# Uncomment them only when the AI analysis / assistant endpoints are
+# actually being run on this backend:
+# tensorflow>=2.10.0
+# opencv-python>=4.8.0
+# google-generativeai>=0.8.0

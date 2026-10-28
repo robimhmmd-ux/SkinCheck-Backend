@@ -1,0 +1,72 @@
+[
+  {
+    "category": "skincare_education",
+    "title": "Urutan Pemakaian Skincare Pagi",
+    "content": "Urutan skincare pagi yang disarankan: 1) Cleanser/Pembersih wajah, 2) Toner, 3) Serum (vitamin C, niacinamide), 4) Moisturizer/Pelembab, 5) Sunscreen SPF 30+. Sunscreen adalah langkah paling penting di pagi hari untuk melindungi kulit dari paparan sinar matahari."
+  },
+  {
+    "category": "skincare_education",
+    "title": "Urutan Pemakaian Skincare Malam",
+    "content": "Urutan skincare malam yang disarankan: 1) Cleansing oil/micellar water (double cleanse jika menggunakan makeup), 2) Cleanser wajah, 3) Toner, 4) Serum/Treatment (retinol, AHA/BHA), 5) Eye cream, 6) Moisturizer/Night cream. Malam hari adalah waktu terbaik untuk menggunakan bahan aktif seperti retinol karena kulit sedang dalam proses regenerasi."
+  },
+  {
+    "category": "ingredients",
+    "title": "Niacinamide (Vitamin B3)",
+    "content": "Niacinamide adalah bahan aktif yang bermanfaat untuk: memperkecil tampilan pori, meratakan warna kulit, mengurangi kemerahan, meningkatkan fungsi pelindung kulit (skin barrier), dan mengontrol produksi minyak berlebih. Konsentrasi yang umum digunakan adalah 2-10%. Cocok untuk hampir semua jenis kulit dan bisa dikombinasikan dengan banyak bahan aktif lain."
+  },
+  {
+    "category": "ingredients",
+    "title": "Salicylic Acid (BHA)",
+    "content": "Salicylic Acid adalah Beta Hydroxy Acid yang larut dalam minyak, sehingga efektif membersihkan pori-pori dari dalam. Bermanfaat untuk kulit berjerawat dan berminyak. Konsentrasi umum: 0.5-2%. Gunakan secara bertahap untuk menghindari iritasi. Hindari penggunaan bersamaan dengan retinol tanpa panduan."
+  },
+  {
+    "category": "ingredients",
+    "title": "Retinol (Vitamin A)",
+    "content": "Retinol adalah turunan vitamin A yang membantu mempercepat pergantian sel kulit, mengurangi garis halus, menyamarkan hiperpigmentasi, dan meningkatkan produksi kolagen. Gunakan di malam hari, mulai dari konsentrasi rendah (0.25-0.5%), dan selalu gunakan sunscreen keesokan harinya. Tidak disarankan untuk ibu hamil/menyusui tanpa konsultasi dokter."
+  },
+  {
+    "category": "ingredients",
+    "title": "Hyaluronic Acid",
+    "content": "Hyaluronic Acid (HA) adalah humektan alami yang mampu menahan kelembapan hingga 1000 kali beratnya. Bermanfaat untuk semua jenis kulit, terutama kulit kering. Gunakan pada kulit yang sedikit lembab untuk hasil optimal. Tersedia dalam berbagai berat molekul: low molecular weight meresap lebih dalam, high molecular weight melembabkan permukaan."
+  },
+  {
+    "category": "ingredients",
+    "title": "Vitamin C (L-Ascorbic Acid)",
+    "content": "Vitamin C adalah antioksidan kuat yang melindungi kulit dari kerusakan akibat radikal bebas, mencerahkan kulit, meratakan warna kulit, dan merangsang produksi kolagen. Konsentrasi efektif: 10-20%. Gunakan di pagi hari sebelum sunscreen. Simpan di tempat sejuk dan gelap karena mudah teroksidasi."
+  },
+  {
+    "category": "product_guidance",
+    "title": "Pemilihan Sunscreen",
+    "content": "Pilih sunscreen dengan SPF minimal 30 untuk penggunaan sehari-hari. SPF 50+ disarankan untuk aktivitas luar ruangan. Ada dua jenis: chemical sunscreen (menyerap sinar UV) dan physical/mineral sunscreen (memantulkan sinar UV, mengandung zinc oxide/titanium dioxide). Reapply setiap 2-3 jam jika beraktivitas di luar ruangan."
+  },
+  {
+    "category": "product_guidance",
+    "title": "Pemilihan Cleanser Sesuai Jenis Kulit",
+    "content": "Kulit berminyak: gunakan gel cleanser atau foam cleanser dengan pH rendah. Kulit kering: gunakan cream cleanser atau milk cleanser yang lembut. Kulit sensitif: pilih cleanser tanpa pewangi, bebas SLS. Kulit kombinasi: gunakan gentle gel cleanser. Hindari sabun batangan biasa karena pH-nya terlalu tinggi untuk wajah."
+  },
+  {
+    "category": "safety",
+    "title": "Tanda Alergi dan Iritasi Kulit",
+    "content": "Jika mengalami kemerahan parah, gatal hebat, pembengkakan, sensasi terbakar yang tidak kunjung reda, atau ruam setelah menggunakan produk skincare, segera hentikan pemakaian dan bilas area dengan air bersih. Jika gejala tidak membaik dalam 24 jam atau memburuk, segera konsultasikan dengan dokter kulit."
+  },
+  {
+    "category": "safety",
+    "title": "Bahan yang Sebaiknya Tidak Dicampur",
+    "content": "Beberapa kombinasi bahan aktif yang perlu dihindari: 1) Retinol + AHA/BHA (risiko iritasi), 2) Vitamin C + Retinol di waktu yang sama (efektivitas berkurang), 3) Benzoyl Peroxide + Retinol (saling membatalkan), 4) AHA/BHA + Vitamin C konsentrasi tinggi (terlalu asam). Konsultasikan dengan ahli jika ragu."
+  },
+  {
+    "category": "faq",
+    "title": "Berapa lama hasil skincare terlihat?",
+    "content": "Umumnya, dibutuhkan 4-12 minggu penggunaan rutin untuk melihat hasil nyata dari produk skincare. Siklus pergantian sel kulit berkisar 28 hari, sehingga perubahan signifikan biasanya terlihat setelah 1-2 siklus. Bersabarlah dan konsisten. Produk anti-aging mungkin membutuhkan waktu lebih lama (3-6 bulan)."
+  },
+  {
+    "category": "faq",
+    "title": "Apakah kulit berminyak tetap perlu moisturizer?",
+    "content": "Ya, kulit berminyak tetap membutuhkan moisturizer. Melewatkan pelembab justru bisa membuat kulit memproduksi lebih banyak minyak sebagai kompensasi. Pilih moisturizer berbasis air (water-based/gel) yang ringan dan non-comedogenic. Hindari moisturizer berat berbasis minyak."
+  },
+  {
+    "category": "faq",
+    "title": "Kapan harus ke dokter kulit?",
+    "content": "Sebaiknya konsultasikan ke dokter kulit jika: 1) Jerawat parah (kistik/nodul) yang tidak membaik dengan perawatan OTC, 2) Perubahan tahi lalat (warna, bentuk, ukuran), 3) Ruam yang tidak sembuh lebih dari 2 minggu, 4) Gatal kronis tanpa penyebab jelas, 5) Luka yang tidak kunjung sembuh, 6) Kerontokan rambut mendadak. SkinCheck adalah alat bantu indikasi visual, bukan pengganti konsultasi medis."
+  }
+]
