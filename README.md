@@ -45,15 +45,17 @@ as JSON when the database cannot be reached, instead of a 500 page.
 ## Auth & CORS
 
 - Auth is the monolith's session-cookie auth: `SessionMiddleware`,
-  cookie `skincheck_session`, 7 days, `same_site="lax"`.
+  cookie `skincheck_session`, 7 days. `same_site` comes from env
+  `SESSION_SAME_SITE` (default `lax` for local dev; set `none` for
+  cross-site production — the app then forces `https_only=True`).
 - CORS: origins from env `FRONTEND_URL` (comma-separated, default
   `http://localhost:3000`), `allow_credentials=True`, all methods
   and headers allowed.
-- **Caveat:** `same_site="lax"` works when frontend and API share a
-  site (same host, or Next.js rewrites/proxy to the API). For a truly
-  cross-site production setup (frontend on one domain, API on another),
-  the cookie will need `same_site="none"` + `https_only=True` — change
-  it in `app/main.py` only when that deployment shape is confirmed.
+- **Production shape (confirmed):** the frontend is live on
+  vercel.app while the API will sit on another domain, so deploy the
+  backend with `SESSION_SAME_SITE=none` and `FRONTEND_URL` set to the
+  live Vercel origin — otherwise login looks successful but the
+  session cookie is dropped and `/api/v2/me` returns 401.
 
 ## Run locally
 

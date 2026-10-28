@@ -1,0 +1,28 @@
+# Vercel Function requirements (api/index.py only).
+# Same core set as the root requirements.txt, without uvicorn
+# (Vercel serves the function itself).
+# Intentionally WITHOUT tensorflow / opencv-python / google-generativeai:
+# they are only imported lazily inside service functions, so keeping
+# them out keeps the Vercel bundle small. Consequence: on Vercel,
+# full AI face-scan analysis will not run (no model in repo anyway)
+# until inference is moved to an external service. Auth, dashboard,
+# history, products and scan upload (status "processing") still work.
+# Pinned: fastapi==0.115.0 + starlette==0.38.6 + jinja2==3.1.4, the
+# versions actually tested with this codebase.
+fastapi==0.115.0
+starlette==0.38.6
+jinja2==3.1.4
+python-dotenv>=1.0.1
+python-multipart>=0.0.9
+pydantic>=2.8.0
+httpx>=0.27.0
+SQLAlchemy>=2.0.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0
+itsdangerous>=2.1.0
+email-validator>=2.1.0
+Pillow>=10.0.0
+pymysql>=1.1.0
+cryptography>=41.0.0
+certifi>=2024.0.0
+numpy>=1.26.0

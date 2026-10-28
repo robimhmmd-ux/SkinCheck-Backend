@@ -12,15 +12,14 @@ Differences from the monolith's ``app/main.py``:
   ``AuthException`` redirect handler is therefore replaced with a JSON
   handler below.
 
-Session cookie caveat (kept as in the monolith, per the split task):
-- SessionMiddleware uses ``same_site="lax"`` and
-  ``https_only=not APP_DEBUG``. That works when the frontend and the
-  API share a site (e.g. Next.js rewrites / proxying to the API, or
-  same-host development). For a truly cross-site production setup
-  (frontend on vercel.app, API on another domain), the cookie will
-  need ``same_site="none"`` + ``https_only=True``; change it in
-  ``create_app`` only when that deployment shape is confirmed, not
-  silently for local development.
+Session cookie (env-driven, so local dev stays safe):
+- Default ``SESSION_SAME_SITE=lax`` + ``https_only=not APP_DEBUG``,
+  as in the monolith. That works when frontend and API share a site.
+- Production cross-site shape is now confirmed (frontend live on
+  vercel.app, API on another domain), so for deployment set
+  ``SESSION_SAME_SITE=none``. The code then forces
+  ``https_only=True``, because browsers reject ``SameSite=None``
+  without ``Secure``. Local development keeps the default ``lax``.
 """
 
 import os
@@ -41,6 +40,20 @@ def _frontend_origins() -> list[str]:
     return origins or ["http://localhost:3000"]
 
 
+def _session_cookie_settings() -> tuple[str, bool]:
+    """Return (same_site, https_only) from SESSION_SAME_SITE.
+
+    ``none`` forces ``https_only=True``; any other value keeps the
+    old local behaviour (``https_only=not APP_DEBUG``). An unknown
+    value falls back to ``lax`` rather than crashing the app.
+    """
+    same_site = os.getenv("SESSION_SAME_SITE", "lax").strip().lower()
+    if same_site not in ("lax", "strict", "none"):
+        same_site = "lax"
+    https_only = True if same_site == "none" else not settings.APP_DEBUG
+    return same_site, https_only
+
+
 def create_app() -> FastAPI:
     """Application factory for the SkinCheck API backend."""
     app = FastAPI(
@@ -52,13 +65,14 @@ def create_app() -> FastAPI:
 
     # Session first (added first), CORS second so CORS runs outermost.
     # Starlette runs the most recently added middleware first.
+    same_site, https_only = _session_cookie_settings()
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.SECRET_KEY,
         session_cookie="skincheck_session",
         max_age=86400 * 7,  # 7 days, same as the monolith
-        same_site="lax",
-        https_only=not settings.APP_DEBUG,
+        same_site=same_site,
+        https_only=https_only,
     )
     app.add_middleware(
         CORSMiddleware,
