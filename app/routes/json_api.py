@@ -19,12 +19,10 @@ OTP note:
   change to this one.
 
 AI / scan note:
-- ``POST /api/v2/scan/upload`` only validates + stores the image and
-  creates a ``SkinScan`` row with ``status="processing"``. It does NOT
-  run the TensorFlow model and does NOT import ``ai_service`` at all,
-  so the app imports and runs without tensorflow / opencv /
-  google-generativeai installed. Full AI analysis is a follow-up
-  endpoint (it must run the .h5 model, which is not in this repo).
+- ``POST /api/v2/scan/upload`` runs synchronous AI analysis when local
+  dependencies (TensorFlow, OpenCV) and the .h5 model are present. On Vercel
+  or environments missing the model/dependencies, it gracefully marks the
+  scan as failed without crashing the server.
 
 Database failure handling:
 - Endpoints that touch the DB catch all DB errors and return
@@ -197,6 +195,17 @@ class RegisterIn(BaseModel):
 @router.get("/health")
 async def health():
     """Public health check, mirrors /api/v1/health. No DB access."""
+    ai_status = "unavailable in this environment (Vercel / missing dependencies)"
+    try:
+        from pathlib import Path
+        model_path = Path(__file__).resolve().parents[2] / "facial-condition-model" / "finetuned_best.h5"
+        if model_path.exists():
+            import tensorflow  # noqa: F401
+            import cv2  # noqa: F401
+            ai_status = "local synchronous Keras VGG16 model active"
+    except Exception:
+        ai_status = "unavailable in this environment (Vercel / missing dependencies)"
+
     return JSONResponse(
         content={
             "status": "online",
@@ -206,7 +215,7 @@ async def health():
             "api": "v2",
             "features": {
                 "templates": "removed - frontend is Next.js",
-                "ai_integration": "lazy - model not required to import",
+                "ai_integration": ai_status,
             },
         }
     )
@@ -426,11 +435,12 @@ async def history_detail(scan_id: int, request: Request, db: Session = Depends(g
 async def scan_upload(
     request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)
 ):
-    """Minimal scan upload: validate + store + create a processing row.
+    """Synchronous scan upload and AI skin analysis.
 
-    No AI analysis is run here and ``ai_service`` is never imported, so
-    TensorFlow / the .h5 model are not required. A follow-up endpoint
-    must pick up ``status="processing"`` rows and run the model.
+    Validates and stores the image, creates a SkinScan row, and immediately
+    executes KerasComputerVisionProvider if local AI dependencies and the .h5
+    model are available. If AI inference fails or is not available, status
+    is updated to 'failed' and analysis remains null without crashing the server.
     """
     user = _require_session(request)
     if user.get("role") != "customer":
@@ -462,14 +472,73 @@ async def scan_upload(
         logger.warning("scan row creation failed: %s", e)
         db.rollback()
         return _db_unavailable()
+
+    # Synchronous AI analysis (Option 1: local execution only)
+    analysis_result = None
+    try:
+        from app.services.ai_service import KerasComputerVisionProvider
+
+        abs_image_path = str(ImageService.get_image_path(filename))
+        provider = KerasComputerVisionProvider()
+        ai_data = provider.analyze_skin_condition(abs_image_path)
+
+        analysis_result = AnalysisResult(
+            skin_scan_id=scan.id,
+            acne_score=float(ai_data.get("acne_score", 0.0)),
+            dry_skin_score=float(ai_data.get("dry_skin_score", 0.0)),
+            oily_skin_score=float(ai_data.get("oily_skin_score", 0.0)),
+            dark_spots_score=float(ai_data.get("dark_spots_score", 0.0)),
+            wrinkles_score=float(ai_data.get("wrinkles_score", 0.0)),
+            redness_score=float(ai_data.get("redness_score", 0.0)),
+            texture_score=float(ai_data.get("texture_score", 0.0)),
+            hyperpigmentation_score=float(ai_data.get("hyperpigmentation_score", 0.0)),
+            overall_score=float(ai_data.get("overall_score", 0.0)),
+            ai_response=json.dumps(
+                {
+                    "acne_score": ai_data.get("acne_score"),
+                    "dry_skin_score": ai_data.get("dry_skin_score"),
+                    "oily_skin_score": ai_data.get("oily_skin_score"),
+                    "dark_spots_score": ai_data.get("dark_spots_score"),
+                    "wrinkles_score": ai_data.get("wrinkles_score"),
+                    "overall_score": ai_data.get("overall_score"),
+                    "confidence": ai_data.get("confidence"),
+                    "frames_analyzed": ai_data.get("frames_analyzed"),
+                    "analysis_status": ai_data.get("analysis_status"),
+                }
+            ),
+        )
+        db.add(analysis_result)
+        scan.status = "completed"
+        db.commit()
+        db.refresh(scan)
+        db.refresh(analysis_result)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI skin analysis failed for scan %s: %s", scan.id, e)
+        db.rollback()
+        try:
+            db.query(SkinScan).filter(SkinScan.id == scan.id).update({"status": "failed"})
+            db.commit()
+            db.refresh(scan)
+        except Exception as update_err:  # noqa: BLE001
+            logger.warning("Failed to mark scan as failed: %s", update_err)
+            db.rollback()
+            scan.status = "failed"
+        analysis_result = None
+
+    response_content = {
+        "scan_id": scan.id,
+        "status": scan.status,
+        "image_path": filename,
+        "analysis": _analysis_dict(analysis_result),
+    }
+    if scan.status == "completed":
+        response_content["message"] = "Scan berhasil dianalisis."
+    else:
+        response_content["message"] = "Analisis AI gagal diproses."
+
     return JSONResponse(
         status_code=201,
-        content={
-            "scan_id": scan.id,
-            "status": scan.status,
-            "image_path": filename,
-            "message": "Scan tersimpan, analisis AI belum dijalankan.",
-        },
+        content=response_content,
     )
 
 

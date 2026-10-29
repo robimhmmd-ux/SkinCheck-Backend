@@ -1,0 +1,5 @@
+# Local AI dependencies for SkinCheck demo (Keras VGG16 inference)
+# DO NOT add these to requirements.txt or api/requirements.txt (keeps Vercel bundle light).
+tensorflow>=2.15.0
+opencv-python>=4.8.0
+
