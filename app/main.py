@@ -35,9 +35,17 @@ from app.routes import api_router, json_api_router
 
 
 def _frontend_origins() -> list[str]:
-    raw = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    raw = os.getenv("FRONTEND_URL", "")
     origins = [o.strip() for o in raw.split(",") if o.strip()]
-    return origins or ["http://localhost:3000"]
+    defaults = [
+        "http://localhost:3000",
+        "https://skincheck-frontend.vercel.app",
+        "https://skincheck-frontend-robimhmmd-uxs-projects.vercel.app",
+    ]
+    for d in defaults:
+        if d not in origins:
+            origins.append(d)
+    return origins
 
 
 def _session_cookie_settings() -> tuple[str, bool]:
@@ -97,6 +105,16 @@ def create_app() -> FastAPI:
     async def auth_exception_handler(request: Request, exc: AuthException):
         # API-only: JSON 401, never an HTML redirect to /login.
         return JSONResponse(status_code=401, content={"detail": "Login required"})
+
+    # Root route for API welcome / status check
+    @app.get("/")
+    async def root():
+        return {
+            "status": "online",
+            "app": "SkinCheck API",
+            "version": "2.0.0",
+            "health": "/api/v2/health",
+        }
 
     # JSON routers only. No static mount, no HTML routers.
     app.include_router(json_api_router)
