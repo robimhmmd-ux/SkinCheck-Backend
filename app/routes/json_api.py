@@ -569,3 +569,92 @@ async def admin_summary(request: Request, db: Session = Depends(get_db)):
             "active_products": active_products,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# AI Assistant (Chatbot)
+# ---------------------------------------------------------------------------
+
+class AssistantChatIn(BaseModel):
+    message: str
+    scan_id: Optional[int] = None
+
+
+@router.post("/assistant/chat")
+async def assistant_chat(
+    request: Request, payload: AssistantChatIn, db: Session = Depends(get_db)
+):
+    """API endpoint for AI skincare assistant chat."""
+    user = _require_session(request)
+    message = payload.message.strip()
+    if not message:
+        return JSONResponse(status_code=400, content={"detail": "Pesan tidak boleh kosong."})
+    if len(message) > 2000:
+        return JSONResponse(status_code=400, content={"detail": "Pesan terlalu panjang (maksimal 2000 karakter)."})
+
+    try:
+        from app.services.ai_assistant_service import assistant
+
+        response_text = assistant.chat(
+            user_id=user["id"],
+            message=message,
+            db=db,
+            scan_id=payload.scan_id,
+            role=user.get("role", "customer"),
+        )
+        return JSONResponse(status_code=200, content={"status": "success", "response": response_text})
+    except Exception as e:
+        logger.error("AI assistant chat error: %s", e)
+        return JSONResponse(status_code=500, content={"detail": "Terjadi kesalahan pada layanan AI."})
+
+
+@router.get("/assistant/history")
+async def assistant_history(
+    request: Request, db: Session = Depends(get_db)
+):
+    """Retrieve chat history for the authenticated user."""
+    user = _session_user(request)
+    if not user:
+        return JSONResponse(status_code=200, content={"status": "success", "history": [], "authenticated": False})
+
+    try:
+        from app.models.chat_message import ChatMessage
+
+        messages = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.user_id == user["id"])
+            .order_by(ChatMessage.created_at.asc())
+            .all()
+        )
+        history = [
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "time": m.created_at.strftime("%H:%M") if m.created_at else "",
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in messages
+        ]
+        return JSONResponse(status_code=200, content={"status": "success", "history": history, "authenticated": True})
+    except Exception as e:
+        logger.warning("assistant history query failed: %s", e)
+        return _db_unavailable()
+
+
+@router.post("/assistant/clear")
+async def assistant_clear(
+    request: Request, db: Session = Depends(get_db)
+):
+    """Clear chat conversation history for the authenticated user."""
+    user = _require_session(request)
+    try:
+        from app.models.chat_message import ChatMessage
+
+        db.query(ChatMessage).filter(ChatMessage.user_id == user["id"]).delete()
+        db.commit()
+        return JSONResponse(status_code=200, content={"status": "success", "message": "Riwayat percakapan berhasil dibersihkan."})
+    except Exception as e:
+        logger.warning("clear chat history failed: %s", e)
+        db.rollback()
+        return _db_unavailable()

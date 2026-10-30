@@ -721,13 +721,15 @@ class AIOrchestrator:
                     except Exception:
                         continue
 
-                self.model = success_model
+                self.model = success_model or "httpx"
                 self.cached_key = api_key
                 self.cached_model_name = model_name
                 logger.info(f"Gemini model initialized successfully with model: {model_name}")
             except Exception as e:
-                logger.error(f"Failed to initialize Gemini with key: {e}")
-                self.model = None
+                logger.info(f"Using HTTPX client for Gemini (SDK not available: {e})")
+                self.model = "httpx"
+                self.cached_key = api_key
+                self.cached_model_name = model_name
 
         return self.model, None
 
@@ -819,9 +821,9 @@ class AIOrchestrator:
             candidate_models = list(dict.fromkeys([current_model_name, "gemini-3.5-flash-lite", "gemini-3.8-flash"]))
             ai_text = None
 
+            api_key = self.cached_key or SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY)
             for m_name in candidate_models:
                 try:
-                    active_m = genai.GenerativeModel(m_name)
                     if role == "admin":
                         prompt_input = (
                             f"{system}\n\n"
@@ -844,19 +846,50 @@ class AIOrchestrator:
                             f"6. Jika ditanya rerata kondisi kulit (jerawat, minyak, kekeringan, noda hitam, kerutan), WAJIB dalam format PERSEN (%) yang sinkron dengan dashboard.\n"
                             f"7. Gunakan bahasa netral dan hangat, tanpa ungkapan religius spesifik."
                         )
-                    response = active_m.generate_content(
-                        contents=[
-                            {"role": "user", "parts": [{"text": prompt_input}]}
-                        ],
-                        generation_config={
-                            "temperature": temp_val,
-                            "max_output_tokens": max_tokens_val,
+
+                    # 1. Try SDK if available and not set to pure httpx
+                    if self.model != "httpx":
+                        try:
+                            import google.generativeai as genai
+                            active_m = genai.GenerativeModel(m_name)
+                            response = active_m.generate_content(
+                                contents=[{"role": "user", "parts": [{"text": prompt_input}]}],
+                                generation_config={
+                                    "temperature": temp_val,
+                                    "max_output_tokens": max_tokens_val,
+                                },
+                                request_options={"timeout": 10}
+                            )
+                            if response and response.text:
+                                ai_text = response.text
+                                break
+                        except Exception as sdk_err:
+                            logger.info(f"SDK generation failed for {m_name} ({sdk_err}), trying HTTPX REST API...")
+
+                    # 2. REST API fallback via httpx (universal fallback)
+                    import httpx
+                    clean_model = m_name if m_name.startswith("models/") else f"models/{m_name}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/{clean_model}:generateContent?key={api_key}"
+                    resp = httpx.post(
+                        url,
+                        json={
+                            "contents": [{"parts": [{"text": prompt_input}]}],
+                            "generationConfig": {
+                                "temperature": temp_val,
+                                "maxOutputTokens": max_tokens_val,
+                            }
                         },
-                        request_options={"timeout": 8}
+                        timeout=12.0
                     )
-                    if response and response.text:
-                        ai_text = response.text
-                        break
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts:
+                                ai_text = parts[0].get("text", "")
+                                if ai_text:
+                                    break
                 except Exception as model_err:
                     logger.warning(f"Model {m_name} failed: {model_err}. Trying fallback model...")
                     continue
