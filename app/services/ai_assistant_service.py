@@ -374,11 +374,12 @@ class ContextBuilder:
             history_lines.append(f"   • Scan #{sc.id} | {sc_date} | Skor: {sc_score} | Status: {sc.status.capitalize()}")
         history_str = "\n".join(history_lines) if history_lines else "   (Belum ada riwayat)"
 
+        masked_email = re.sub(r"(?<=.).(?=.*@)", "*", user.email) if user.email and "@" in user.email else "-"
         return (
             f"DATA PENGGUNA & RINGKASAN DASHBOARD (SINKRON REAL-TIME DENGAN TAMPILAN WEB):\n"
             f"1. PROFIL PENGGUNA:\n"
             f"   • Nama Pengguna: {user.name}\n"
-            f"   • Email: {user.email}\n"
+            f"   • Email Terdaftar: {masked_email}\n"
             f"   • Tanggal Bergabung: {joined_str}\n"
             f"   • Status Akun: {user.status}\n"
             f"   • Fokus Perawatan Kulit: {concerns_str}\n\n"
@@ -633,6 +634,8 @@ CUSTOMER_SYSTEM_PROMPT = """Nama kamu adalah Luvenna (Ven), asisten pribadi untu
 2. TO THE POINT, RINGKAS & PADAT:
    - Sampaikan jawaban langsung ke inti persoalan tanpa berbelit-belit.
    - Cukup 1 sampai 3 kalimat padat (atau poin ringkas bila diperlukan). Hindari paragraf panjang yang melelahkan.
+   - Jika ditanya "siapa kamu?", perkenalkan diri: Luvenna (Ven), asisten SkinCheck untuk kesehatan kulit wajah.
+   - Jika ditanya "siapa saya?", jawab dari data nama akun dan ringkasan scannya, tanpa menyebutkan email lengkap atau password.
 
 3. TIDAK USAH SELALU MENYAPA DI SETIAP JAWABAN:
    - JANGAN menyapa (seperti "Halo [Nama]!", "Hai!", "Selamat pagi") di awal jawaban saat menjawab pertanyaan.
@@ -1145,6 +1148,10 @@ class AIOrchestrator:
                 if re.search(pattern, msg_lower):
                     return SafetyLayer.DATABASE_RESTRICTION_REJECTION
 
+        # 1. Identity inquiry: "siapa kamu" / "kamu siapa"
+        if any(w in msg_lower for w in ["siapa kamu", "kamu siapa", "siapa namamu", "nama kamu siapa"]):
+            return "Aku Luvenna (Ven), asisten SkinCheck untuk kesehatan kulit wajah."
+
         # 1. Greetings handling for Customer ("hi", "hiii", "halo", "hai", dll.)
         greetings = [
             "hi", "hii", "hiii", "halo", "hai", "helo", "hello", "hey", "hola",
@@ -1183,9 +1190,8 @@ class AIOrchestrator:
                 focus_phrase = f" dengan fokus perhatian pada {concerns_str}" if concerns_str else ""
 
                 return (
-                    f"Kamu adalah **{u.name}**, pengguna terdaftar di SkinCheck dengan email **{u.email}**. "
-                    f"Kamu sudah bergabung bersama kami sejak {joined_str} dan merupakan pengguna setia {scan_phrase}{focus_phrase}. "
-                    f"Senang sekali Luvenna bisa menjadi asisten pribadimu untuk mendampingi setiap langkah perawatan kulit wajahmu!"
+                    f"Kamu adalah **{u.name}**, pengguna terdaftar di SkinCheck sejak {joined_str}. "
+                    f"Saat ini kamu {scan_phrase}{focus_phrase}."
                 )
 
         # 3. Customer asking how many times they scanned ("berapa kali hasil cek", "berapa kali scan")

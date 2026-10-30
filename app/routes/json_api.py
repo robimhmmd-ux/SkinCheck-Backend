@@ -514,6 +514,7 @@ async def scan_upload(
         db.refresh(analysis_result)
     except Exception as e:  # noqa: BLE001
         logger.warning("AI skin analysis failed for scan %s: %s", scan.id, e)
+        error_msg = str(e)
         db.rollback()
         try:
             db.query(SkinScan).filter(SkinScan.id == scan.id).update({"status": "failed"})
@@ -534,12 +535,124 @@ async def scan_upload(
     if scan.status == "completed":
         response_content["message"] = "Scan berhasil dianalisis."
     else:
-        response_content["message"] = "Analisis AI gagal diproses."
+        response_content["message"] = error_msg or "Analisis AI gagal diproses."
 
     return JSONResponse(
         status_code=201,
         content=response_content,
     )
+
+
+@router.post("/scan/multi-upload", status_code=201)
+async def scan_multi_upload(
+    request: Request, files: List[UploadFile] = File(...), db: Session = Depends(get_db)
+):
+    """Synchronous multi-frame upload and multi-pose AI skin analysis.
+
+    Receives multiple webcam frames (e.g. 10 fps over multi-pose capture),
+    filters frames with YuNet face detection and pose estimation, samples
+    best frames per pose, executes batch VGG16 skin condition inference,
+    and stores 1 SkinScan + 1 AnalysisResult row.
+    """
+    user = _require_session(request)
+    if user.get("role") != "customer":
+        raise _forbidden("Upload scan ini untuk customer.")
+    if not files:
+        return JSONResponse(
+            status_code=400, content={"detail": "Minimal 1 frame foto harus diunggah."}
+        )
+
+    from app.services.image_service import ImageService
+
+    saved_filenames = []
+    saved_abs_paths = []
+    for f in files:
+        try:
+            fname = await ImageService.process_and_save_scan(f)
+            saved_filenames.append(fname)
+            saved_abs_paths.append(str(ImageService.get_image_path(fname)))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Frame validation skipped: %s", e)
+            continue
+
+    if not saved_filenames:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Tidak ada frame gambar valid yang dapat diproses."},
+        )
+
+    # Create scan row with first representative frame
+    try:
+        scan = SkinScan(
+            user_id=user["id"],
+            image_path=saved_filenames[0],
+            status="processing",
+            image_quality_score=0.9,
+        )
+        db.add(scan)
+        db.commit()
+        db.refresh(scan)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("multi-scan row creation failed: %s", e)
+        db.rollback()
+        return _db_unavailable()
+
+    analysis_result = None
+    ai_data = {}
+    error_msg = None
+    try:
+        from app.services.ai_service import KerasComputerVisionProvider
+
+        provider = KerasComputerVisionProvider()
+        ai_data = provider.analyze_multi_frame_skin_condition(saved_abs_paths)
+
+        analysis_result = AnalysisResult(
+            skin_scan_id=scan.id,
+            acne_score=float(ai_data.get("acne_score", 0.0)),
+            dry_skin_score=float(ai_data.get("dry_skin_score", 0.0)),
+            oily_skin_score=float(ai_data.get("oily_skin_score", 0.0)),
+            dark_spots_score=float(ai_data.get("dark_spots_score", 0.0)),
+            wrinkles_score=float(ai_data.get("wrinkles_score", 0.0)),
+            redness_score=float(ai_data.get("redness_score", 0.0)),
+            texture_score=float(ai_data.get("texture_score", 0.0)),
+            hyperpigmentation_score=float(ai_data.get("hyperpigmentation_score", 0.0)),
+            overall_score=float(ai_data.get("overall_score", 0.0)),
+            ai_response=json.dumps(ai_data),
+        )
+        db.add(analysis_result)
+        scan.status = "completed"
+        db.commit()
+        db.refresh(scan)
+        db.refresh(analysis_result)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI multi-frame skin analysis failed for scan %s: %s", scan.id, e)
+        error_msg = str(e)
+        db.rollback()
+        try:
+            db.query(SkinScan).filter(SkinScan.id == scan.id).update({"status": "failed"})
+            db.commit()
+            db.refresh(scan)
+        except Exception as update_err:  # noqa: BLE001
+            logger.warning("Failed to mark multi-scan as failed: %s", update_err)
+            db.rollback()
+            scan.status = "failed"
+        analysis_result = None
+
+    response_content = {
+        "scan_id": scan.id,
+        "status": scan.status,
+        "image_path": scan.image_path,
+        "analysis": _analysis_dict(analysis_result),
+        "frames_captured": len(files),
+        "frames_passed_yunet": ai_data.get("frames_passed_yunet", 0),
+        "frames_used_vgg": ai_data.get("frames_used_vgg", 0),
+    }
+    if scan.status == "completed":
+        response_content["message"] = "Scan multi-pose berhasil dianalisis."
+    else:
+        response_content["message"] = error_msg or "Analisis AI multi-frame gagal diproses."
+
+    return JSONResponse(status_code=201, content=response_content)
 
 
 # ---------------------------------------------------------------------------
