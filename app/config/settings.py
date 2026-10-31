@@ -49,6 +49,12 @@ class Settings:
     MAIL_PASSWORD: str = os.getenv("MAIL_PASSWORD", "")   # Gmail App Password (16 chars)
     MAIL_FROM_NAME: str = os.getenv("MAIL_FROM_NAME", "SkinCheck AI")
 
+    # OTP via WhatsApp (Fonnte) — token diisi pemiliknya sendiri, never
+    # di-commit. Service fonnte_otp membaca token per-request dari
+    # system_settings (WA_API_TOKEN) dulu, lalu env ini.
+    FONNTE_TOKEN: str = os.getenv("FONNTE_TOKEN", "") or os.getenv("WA_API_TOKEN", "")
+    FONNTE_API_URL: str = os.getenv("FONNTE_API_URL", "") or os.getenv("WA_API_URL", "https://api.fonnte.com/send")
+
     # Paths
     TEMPLATE_DIR: Path = BASE_DIR / "app" / "views"
     STATIC_DIR: Path = BASE_DIR / "app" / "static"

@@ -13,10 +13,11 @@ OTP note:
 - The monolith's registration flow is a two-step OTP (email/WhatsApp)
   flow. ``POST /api/v2/auth/register`` intentionally bypasses OTP and
   creates the account directly, mirroring the monolith's
-  ``REGISTRATION_OTP_MODE=bypass`` branch. The OTP email flow stays in
-  the monolith for now; if OTP is re-introduced for the API, it should
-  be a separate ``/api/v2/auth/verify-otp`` endpoint, not a silent
-  change to this one.
+  ``REGISTRATION_OTP_MODE=bypass`` branch. WhatsApp OTP is exposed
+  separately as ``POST /api/v2/auth/otp/request`` +
+  ``POST /api/v2/auth/otp/verify`` (Fonnte, see
+  ``app/services/fonnte_otp.py``) — it verifies a phone number, it does
+  not silently change registration, and it never returns the code.
 
 AI / scan note:
 - ``POST /api/v2/scan/upload`` runs synchronous AI analysis when local
@@ -188,6 +189,16 @@ class RegisterIn(BaseModel):
     skin_concerns: Optional[List[str]] = None
 
 
+class OtpRequestIn(BaseModel):
+    phone: str
+    name: Optional[str] = None
+
+
+class OtpVerifyIn(BaseModel):
+    phone: str
+    code: str
+
+
 # ---------------------------------------------------------------------------
 # Public
 # ---------------------------------------------------------------------------
@@ -329,6 +340,75 @@ async def register(request: Request, payload: RegisterIn, db: Session = Depends(
 async def logout(request: Request):
     request.session.clear()
     return JSONResponse(content={"status": "ok"})
+
+
+@router.post("/auth/otp/request")
+async def otp_request(payload: OtpRequestIn, db: Session = Depends(get_db)):
+    """Kirim kode OTP 6 digit via WhatsApp (Fonnte) ke nomor yang diminta.
+
+    Tidak pernah mengembalikan kode di respons. Kalau token Fonnte
+    belum dikonfigurasi, balas 503 yang jelas (bukan klaim "terkirim").
+    Register /api/v2 tetap langsung tanpa gate OTP — endpoint ini
+    verifikasi WhatsApp mandiri, dipakai halaman /verify-otp.
+    """
+    from app.services.fonnte_otp import (
+        FonnteNotConfiguredError,
+        FonnteSendError,
+        InvalidPhoneError,
+        TooSoonError,
+        mask_phone,
+        normalize_phone,
+        request_whatsapp_otp,
+    )
+
+    try:
+        result = request_whatsapp_otp(db, payload.phone, payload.name or "")
+    except InvalidPhoneError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    except TooSoonError as e:
+        return JSONResponse(status_code=429, content={"detail": str(e)})
+    except FonnteNotConfiguredError:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Token Fonnte belum dikonfigurasi. Isi FONNTE_TOKEN di Environment Variables backend (atau WA_API_TOKEN di pengaturan sistem), lalu redeploy backend."},
+        )
+    except FonnteSendError:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Gagal mengirim WhatsApp via Fonnte. Periksa token Fonnte dan nomor perangkat Fonnte, lalu coba lagi."},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("otp request failed: %s", e)
+        db.rollback()
+        return _db_unavailable()
+    return JSONResponse(content={"status": "sent", **result})
+
+
+@router.post("/auth/otp/verify")
+async def otp_verify(payload: OtpVerifyIn, db: Session = Depends(get_db)):
+    """Verifikasi kode OTP WhatsApp (6 digit, 10 menit, sekali pakai)."""
+    from app.services.fonnte_otp import (
+        InvalidPhoneError,
+        mask_phone,
+        normalize_phone,
+        verify_whatsapp_otp,
+    )
+
+    try:
+        ok = verify_whatsapp_otp(db, payload.phone, payload.code)
+        phone_masked = mask_phone(normalize_phone(payload.phone))
+    except InvalidPhoneError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("otp verify failed: %s", e)
+        db.rollback()
+        return _db_unavailable()
+    if not ok:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Kode OTP salah, sudah dipakai, atau sudah kedaluwarsa. Minta kode baru."},
+        )
+    return JSONResponse(content={"verified": True, "phone_masked": phone_masked})
 
 
 @router.get("/me")
