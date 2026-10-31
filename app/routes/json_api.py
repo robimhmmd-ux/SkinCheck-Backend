@@ -10,14 +10,12 @@ Auth model (kept identical to the monolith, see AuthController):
 - Passwords are bcrypt-hashed via ``app.utils.auth`` (same as monolith).
 
 OTP note:
-- The monolith's registration flow is a two-step OTP (email/WhatsApp)
-  flow. ``POST /api/v2/auth/register`` intentionally bypasses OTP and
-  creates the account directly, mirroring the monolith's
-  ``REGISTRATION_OTP_MODE=bypass`` branch. WhatsApp OTP is exposed
-  separately as ``POST /api/v2/auth/otp/request`` +
-  ``POST /api/v2/auth/otp/verify`` (Fonnte, see
-  ``app/services/fonnte_otp.py``) — it verifies a phone number, it does
-  not silently change registration, and it never returns the code.
+- Registration is OTP-gated: ``POST /api/v2/auth/register`` creates the
+  account with status ``pending`` and NO session. WhatsApp OTP
+  (``POST /api/v2/auth/otp/request`` + ``POST /api/v2/auth/otp/verify``,
+  Fonnte, see ``app/services/fonnte_otp.py``) activates it
+  (pending -> active); ``/auth/login`` rejects pending accounts until
+  then. The OTP code is never returned in an API response.
 
 AI / scan note:
 - ``POST /api/v2/scan/upload`` runs synchronous AI analysis when local
@@ -187,11 +185,11 @@ class RegisterIn(BaseModel):
     email: EmailStr
     password: str
     skin_concerns: Optional[List[str]] = None
-    # Nomor WhatsApp untuk OTP Fonnte. User tidak punya kolom phone,
-    # jadi nomor yang sudah dinormalisasi (62...) disimpan di
-    # profile_data JSON, sama seperti skin_concerns. Opsional di API
-    # supaya klien lama tidak rusak; form daftar frontend mewajibkannya.
-    phone: Optional[str] = None
+    # Nomor WhatsApp untuk OTP Fonnte — WAJIB sejak akun dibuat pending
+    # sampai verifikasi OTP. User tidak punya kolom phone, jadi nomor
+    # yang sudah dinormalisasi (62...) disimpan di profile_data JSON,
+    # sama seperti skin_concerns.
+    phone: str
 
 
 class OtpRequestIn(BaseModel):
@@ -273,6 +271,11 @@ async def login(request: Request, payload: LoginIn, db: Session = Depends(get_db
         return JSONResponse(
             status_code=401, content={"detail": "Email atau password salah."}
         )
+    if user.status == "pending":
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Akun belum terverifikasi. Verifikasi kode OTP WhatsApp dulu di halaman verifikasi, lalu coba masuk lagi."},
+        )
     if user.status != "active":
         return JSONResponse(
             status_code=401, content={"detail": "Akun dinonaktifkan."}
@@ -293,12 +296,16 @@ async def login(request: Request, payload: LoginIn, db: Session = Depends(get_db
 
 @router.post("/auth/register", status_code=201)
 async def register(request: Request, payload: RegisterIn, db: Session = Depends(get_db)):
-    """Direct registration (OTP bypass, see module docstring).
+    """Registration yang digerbang OTP WhatsApp.
 
-    The User model has no ``phone`` / ``skin_concerns`` columns, so
-    skin concerns and the WhatsApp number are stored in ``profile_data``
-    JSON, exactly as the monolith's ``User.get_profile_data()`` expects.
-    Nomor WA inilah yang dipakai halaman /verify-otp untuk OTP Fonnte.
+    Akun dibuat dengan status ``pending`` dan TIDAK diberi sesi login
+    sampai kode OTP WhatsApp terverifikasi (lihat /auth/otp/verify,
+    yang mengubah pending -> active). Jadi "berhasil daftar" tidak lagi
+    berarti "bisa langsung masuk". The User model has no ``phone`` /
+    ``skin_concerns`` columns, so skin concerns and the WhatsApp number
+    are stored in ``profile_data`` JSON, exactly as the monolith's
+    ``User.get_profile_data()`` expects. Nomor WA inilah yang dipakai
+    halaman /verify-otp untuk OTP Fonnte.
     """
     name = payload.name.strip()
     email = payload.email.strip().lower()
@@ -306,36 +313,42 @@ async def register(request: Request, payload: RegisterIn, db: Session = Depends(
         return JSONResponse(
             status_code=400, content={"detail": "Nama, email, dan password wajib diisi."}
         )
+    if not payload.phone or not payload.phone.strip():
+        return JSONResponse(
+            status_code=400, content={"detail": "Nomor WhatsApp wajib diisi untuk verifikasi OTP."}
+        )
     if len(payload.password) < 6:
         return JSONResponse(
             status_code=400, content={"detail": "Password minimal 6 karakter."}
         )
-    phone62 = None
-    if payload.phone and payload.phone.strip():
-        try:
-            from app.services.fonnte_otp import normalize_phone
-
-            phone62 = normalize_phone(payload.phone)
-        except Exception as e:  # noqa: BLE001 - InvalidPhoneError
-            return JSONResponse(status_code=400, content={"detail": str(e)})
     try:
-        if db.query(User).filter(User.email == email).first():
+        from app.services.fonnte_otp import mask_phone, normalize_phone
+
+        phone62 = normalize_phone(payload.phone)
+    except Exception as e:  # noqa: BLE001 - InvalidPhoneError
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    try:
+        existing = db.query(User).filter(User.email == email).first()
+        if existing:
+            if existing.status == "pending":
+                return JSONResponse(
+                    status_code=409,
+                    content={"detail": "Email sudah terdaftar tapi belum terverifikasi. Buka halaman verifikasi OTP WhatsApp dan verifikasi nomor kamu."},
+                )
             return JSONResponse(
                 status_code=409, content={"detail": "Email sudah terdaftar."}
             )
         profile_data = {}
         if payload.skin_concerns:
             profile_data["skin_concerns"] = payload.skin_concerns
-        if phone62:
-            profile_data["phone"] = phone62
-        profile = json.dumps(profile_data) if profile_data else None
+        profile_data["phone"] = phone62
         user = User(
             name=name,
             email=email,
             password_hash=get_password_hash(payload.password),
             role="customer",
-            status="active",
-            profile_data=profile,
+            status="pending",
+            profile_data=json.dumps(profile_data),
         )
         db.add(user)
         db.commit()
@@ -344,13 +357,16 @@ async def register(request: Request, payload: RegisterIn, db: Session = Depends(
         logger.warning("register failed: %s", e)
         db.rollback()
         return _db_unavailable()
-    request.session["user"] = {
-        "id": user.id,
-        "name": user.name,
-        "email": user.email,
-        "role": user.role,
-    }
-    return JSONResponse(status_code=201, content={"user": _user_dict(user)})
+    # Sengaja TIDAK membuat sesi: akun pending tidak boleh masuk
+    # sebelum OTP terverifikasi.
+    return JSONResponse(
+        status_code=201,
+        content={
+            "user": _user_dict(user),
+            "otp_required": True,
+            "phone_masked": mask_phone(phone62),
+        },
+    )
 
 
 @router.post("/auth/logout")
@@ -389,10 +405,10 @@ async def otp_request(payload: OtpRequestIn, db: Session = Depends(get_db)):
             status_code=503,
             content={"detail": "Token Fonnte belum dikonfigurasi. Isi FONNTE_TOKEN di Environment Variables backend (atau WA_API_TOKEN di pengaturan sistem), lalu redeploy backend."},
         )
-    except FonnteSendError:
+    except FonnteSendError as e:
         return JSONResponse(
             status_code=503,
-            content={"detail": "Gagal mengirim WhatsApp via Fonnte. Periksa token Fonnte dan nomor perangkat Fonnte, lalu coba lagi."},
+            content={"detail": str(e) or "Gagal mengirim WhatsApp via Fonnte. Periksa token Fonnte dan nomor perangkat Fonnte, lalu coba lagi."},
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("otp request failed: %s", e)
@@ -403,7 +419,13 @@ async def otp_request(payload: OtpRequestIn, db: Session = Depends(get_db)):
 
 @router.post("/auth/otp/verify")
 async def otp_verify(payload: OtpVerifyIn, db: Session = Depends(get_db)):
-    """Verifikasi kode OTP WhatsApp (6 digit, 10 menit, sekali pakai)."""
+    """Verifikasi kode OTP WhatsApp (6 digit, 10 menit, sekali pakai).
+
+    Kalau kode benar, akun pending dengan nomor WA yang sama diaktifkan
+    (pending -> active) sehingga baru bisa login. Verifikasi mandiri
+    tanpa akun (mis. nomor belum didaftarkan) tetap mengembalikan
+    verified=True tanpa mengaktifkan apa-apa.
+    """
     from app.services.fonnte_otp import (
         InvalidPhoneError,
         mask_phone,
@@ -413,7 +435,8 @@ async def otp_verify(payload: OtpVerifyIn, db: Session = Depends(get_db)):
 
     try:
         ok = verify_whatsapp_otp(db, payload.phone, payload.code)
-        phone_masked = mask_phone(normalize_phone(payload.phone))
+        phone62 = normalize_phone(payload.phone)
+        phone_masked = mask_phone(phone62)
     except InvalidPhoneError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception as e:  # noqa: BLE001
@@ -425,7 +448,24 @@ async def otp_verify(payload: OtpVerifyIn, db: Session = Depends(get_db)):
             status_code=400,
             content={"detail": "Kode OTP salah, sudah dipakai, atau sudah kedaluwarsa. Minta kode baru."},
         )
-    return JSONResponse(content={"verified": True, "phone_masked": phone_masked})
+    activated = False
+    try:
+        for candidate in db.query(User).filter(User.status == "pending").all():
+            try:
+                data = json.loads(candidate.profile_data or "{}")
+            except Exception:  # noqa: BLE001
+                data = {}
+            if data.get("phone") == phone62:
+                candidate.status = "active"
+                activated = True
+        if activated:
+            db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("otp activation failed: %s", e)
+        db.rollback()
+    return JSONResponse(
+        content={"verified": True, "phone_masked": phone_masked, "account_activated": activated}
+    )
 
 
 @router.get("/me")

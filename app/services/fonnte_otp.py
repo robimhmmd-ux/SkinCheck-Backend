@@ -142,7 +142,13 @@ def _send_whatsapp(phone62: str, message: str, db: Session) -> None:
             "Fonnte menolak kirim ke %s (HTTP %s, reason: %s)",
             mask_phone(phone62), resp.status_code, reason,
         )
-        raise FonnteSendError("Fonnte menolak pengiriman WhatsApp.")
+        # Alasan Fonnte diteruskan ke user (bukan token) supaya diagnosa
+        # tidak lagi sekadar "gagal" — misalnya perangkat tidak terhubung
+        # atau token salah akan terbaca dari pesan ini.
+        detail = "Fonnte menolak pengiriman WhatsApp."
+        if reason:
+            detail += f" Alasan dari Fonnte: {reason[:200]}"
+        raise FonnteSendError(detail)
     logger.info("OTP WhatsApp terkirim via Fonnte ke %s", mask_phone(phone62))
 
 
