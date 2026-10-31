@@ -187,6 +187,11 @@ class RegisterIn(BaseModel):
     email: EmailStr
     password: str
     skin_concerns: Optional[List[str]] = None
+    # Nomor WhatsApp untuk OTP Fonnte. User tidak punya kolom phone,
+    # jadi nomor yang sudah dinormalisasi (62...) disimpan di
+    # profile_data JSON, sama seperti skin_concerns. Opsional di API
+    # supaya klien lama tidak rusak; form daftar frontend mewajibkannya.
+    phone: Optional[str] = None
 
 
 class OtpRequestIn(BaseModel):
@@ -291,8 +296,9 @@ async def register(request: Request, payload: RegisterIn, db: Session = Depends(
     """Direct registration (OTP bypass, see module docstring).
 
     The User model has no ``phone`` / ``skin_concerns`` columns, so
-    skin concerns are stored in ``profile_data`` JSON, exactly as the
-    monolith's ``User.get_profile_data()`` expects.
+    skin concerns and the WhatsApp number are stored in ``profile_data``
+    JSON, exactly as the monolith's ``User.get_profile_data()`` expects.
+    Nomor WA inilah yang dipakai halaman /verify-otp untuk OTP Fonnte.
     """
     name = payload.name.strip()
     email = payload.email.strip().lower()
@@ -304,14 +310,25 @@ async def register(request: Request, payload: RegisterIn, db: Session = Depends(
         return JSONResponse(
             status_code=400, content={"detail": "Password minimal 6 karakter."}
         )
+    phone62 = None
+    if payload.phone and payload.phone.strip():
+        try:
+            from app.services.fonnte_otp import normalize_phone
+
+            phone62 = normalize_phone(payload.phone)
+        except Exception as e:  # noqa: BLE001 - InvalidPhoneError
+            return JSONResponse(status_code=400, content={"detail": str(e)})
     try:
         if db.query(User).filter(User.email == email).first():
             return JSONResponse(
                 status_code=409, content={"detail": "Email sudah terdaftar."}
             )
-        profile = None
+        profile_data = {}
         if payload.skin_concerns:
-            profile = json.dumps({"skin_concerns": payload.skin_concerns})
+            profile_data["skin_concerns"] = payload.skin_concerns
+        if phone62:
+            profile_data["phone"] = phone62
+        profile = json.dumps(profile_data) if profile_data else None
         user = User(
             name=name,
             email=email,
