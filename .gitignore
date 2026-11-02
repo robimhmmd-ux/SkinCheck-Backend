@@ -48,3 +48,6 @@ ENV/
 .agents/
 .playwright-mcp/
 skills-lock.json
+
+facial-condition-model/
+*.docx

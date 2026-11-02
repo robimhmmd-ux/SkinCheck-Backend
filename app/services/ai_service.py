@@ -292,6 +292,40 @@ class KerasComputerVisionProvider(AIProviderInterface):
         except Exception as e:
             logger.error(f"Failed to load VGG16 model: {e}")
 
+    def _call_modal_analyze(self, image_path: str) -> dict:
+        """Forward image to serverless Modal.com AI endpoint when local model is absent."""
+        import httpx
+        from app.config.settings import settings
+
+        modal_url = settings.MODAL_AI_URL.rstrip("/") + "/analyze"
+        try:
+            with open(str(image_path), "rb") as f:
+                files = {"file": (os.path.basename(image_path), f, "image/jpeg")}
+                with httpx.Client(timeout=60.0) as client:
+                    resp = client.post(modal_url, files=files)
+                if resp.status_code == 422:
+                    detail = resp.json().get("detail", "Tidak terdeteksi wajah pada gambar.")
+                    raise ValueError(detail)
+                resp.raise_for_status()
+                data = resp.json()
+                return {
+                    "acne_score": data["acne_score"],
+                    "dry_skin_score": data["dry_skin_score"],
+                    "oily_skin_score": data["oily_skin_score"],
+                    "dark_spots_score": data["dark_spots_score"],
+                    "wrinkles_score": data["wrinkles_score"],
+                    "redness_score": 0.0,
+                    "texture_score": data["wrinkles_score"],
+                    "hyperpigmentation_score": data["dark_spots_score"],
+                    "overall_score": data["overall_score"],
+                    "confidence": data.get("confidence", 0.92),
+                    "frames_analyzed": 1,
+                    "analysis_status": "success",
+                }
+        except httpx.HTTPError as e:
+            logger.error(f"Modal AI endpoint request error: {e}")
+            raise RuntimeError(f"Gagal menghubungi server AI Modal: {e}")
+
     def detect_face(self, image_path: str) -> bool:
         """Validates face presence using real YuNet face detector."""
         return self.yunet.detect_face(image_path)
@@ -307,7 +341,8 @@ class KerasComputerVisionProvider(AIProviderInterface):
         if not self.model:
             self._load_model()
             if not self.model:
-                raise Exception("Model AI belum dimuat atau tidak ditemukan!")
+                logger.info("Local VGG16 model not loaded; delegating to Modal.com AI...")
+                return self._call_modal_analyze(image_path)
 
         import cv2
 
@@ -375,7 +410,8 @@ class KerasComputerVisionProvider(AIProviderInterface):
         if not self.model:
             self._load_model()
             if not self.model:
-                raise Exception("Model AI belum dimuat atau tidak ditemukan!")
+                logger.info("Local VGG16 model not loaded; delegating to Modal.com AI...")
+                return self._call_modal_analyze(image_path)
 
         if not image_paths:
             raise ValueError("Daftar frame gambar tidak boleh kosong.")

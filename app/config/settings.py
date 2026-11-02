@@ -55,6 +55,12 @@ class Settings:
     FONNTE_TOKEN: str = os.getenv("FONNTE_TOKEN", "") or os.getenv("WA_API_TOKEN", "")
     FONNTE_API_URL: str = os.getenv("FONNTE_API_URL", "") or os.getenv("WA_API_URL", "https://api.fonnte.com/send")
 
+    # Modal.com AI Service URL (YuNet ONNX + VGG16 H5)
+    MODAL_AI_URL: str = os.getenv(
+        "MODAL_AI_URL",
+        "https://robimhmmd-ux--skincheck-ai-skincheckai-web.us-east.modal.run",
+    )
+
     # Paths
     TEMPLATE_DIR: Path = BASE_DIR / "app" / "views"
     STATIC_DIR: Path = BASE_DIR / "app" / "static"
