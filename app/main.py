@@ -52,10 +52,16 @@ def _session_cookie_settings() -> tuple[str, bool]:
     """Return (same_site, https_only) from SESSION_SAME_SITE.
 
     ``none`` forces ``https_only=True``; any other value keeps the
-    old local behaviour (``https_only=not APP_DEBUG``). An unknown
-    value falls back to ``lax`` rather than crashing the app.
+    old local behaviour (``https_only=not APP_DEBUG``). Defaults to
+    ``none`` in production / cross-site (Vercel) so mobile browsers
+    (iOS Safari, Android Chrome) can properly store and send session cookies.
     """
-    same_site = os.getenv("SESSION_SAME_SITE", "lax").strip().lower()
+    same_site = os.getenv("SESSION_SAME_SITE", "").strip().lower()
+    if not same_site:
+        if os.getenv("VERCEL") == "1" or os.getenv("APP_ENV") == "production":
+            same_site = "none"
+        else:
+            same_site = "lax"
     if same_site not in ("lax", "strict", "none"):
         same_site = "lax"
     https_only = True if same_site == "none" else not settings.APP_DEBUG
@@ -85,6 +91,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_frontend_origins(),
+        allow_origin_regex=r"^https://.*\.vercel\.app$|^http://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

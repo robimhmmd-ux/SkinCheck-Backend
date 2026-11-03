@@ -579,8 +579,11 @@ async def scan_upload(
     model are available. If AI inference fails or is not available, status
     is updated to 'failed' and analysis remains null without crashing the server.
     """
-    user = _require_session(request)
-    if user.get("role") != "customer":
+    user = _session_user(request)
+    if not user:
+        # Fallback to demo/tester user (id=1) for guest testing on mobile devices
+        user = {"id": 1, "name": "Tester", "role": "customer", "is_guest": True}
+    elif user.get("role") != "customer":
         raise _forbidden("Upload scan ini untuk customer.")
     # Imported here (not at module level) so a missing Pillow install
     # fails only this endpoint, not the whole app import.
@@ -668,6 +671,7 @@ async def scan_upload(
         "status": scan.status,
         "image_path": filename,
         "analysis": _analysis_dict(analysis_result),
+        "is_guest": user.get("is_guest", False),
     }
     if scan.status == "completed":
         response_content["message"] = "Scan berhasil dianalisis."
@@ -691,8 +695,11 @@ async def scan_multi_upload(
     best frames per pose, executes batch VGG16 skin condition inference,
     and stores 1 SkinScan + 1 AnalysisResult row.
     """
-    user = _require_session(request)
-    if user.get("role") != "customer":
+    user = _session_user(request)
+    if not user:
+        # Fallback to demo/tester user (id=1) for guest testing on mobile devices
+        user = {"id": 1, "name": "Tester", "role": "customer", "is_guest": True}
+    elif user.get("role") != "customer":
         raise _forbidden("Upload scan ini untuk customer.")
     if not files:
         return JSONResponse(
@@ -783,6 +790,7 @@ async def scan_multi_upload(
         "frames_captured": len(files),
         "frames_passed_yunet": ai_data.get("frames_passed_yunet", 0),
         "frames_used_vgg": ai_data.get("frames_used_vgg", 0),
+        "is_guest": user.get("is_guest", False),
     }
     if scan.status == "completed":
         response_content["message"] = "Scan multi-pose berhasil dianalisis."
