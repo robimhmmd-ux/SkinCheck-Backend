@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Optional, List
 from sqlalchemy.orm import Session
@@ -31,7 +32,7 @@ from app.models.system_setting import SystemSetting
 from app.models.chat_message import ChatMessage
 from app.models.activity_log import ActivityLog
 from app.models.otp_token import OTPToken
-from sqlalchemy import func, desc
+from sqlalchemy import case, func, desc
 
 logger = logging.getLogger(__name__)
 
@@ -258,10 +259,13 @@ class ContextBuilder:
     @staticmethod
     def build_user_context(user_id: int, db: Session, scan_id: Optional[int] = None) -> str:
         """
-        Builds structured personal context strictly for the logged-in user:
-        Account profile, personal scan history, personal health scores & averages.
-        Strictly limits data scope to this user_id only (no access to other accounts or platform-wide tables).
-        Synchronized 100% with User Dashboard display (including percentages for condition averages).
+        Builds structured personal context strictly for the logged-in user.
+        FAST VERSION (speed fix 2026-11-04): the old version loaded ALL of the
+        user's scans and then issued one AnalysisResult query per scan (N+1)
+        plus one query per recent scan. This version issues exactly 4 bounded
+        queries: profile, aggregate stats, latest analysed scan, recent 5 scans
+        with their analyses fetched in a single IN query. Output format is kept
+        identical so prompt behaviour does not change.
         """
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
@@ -272,33 +276,43 @@ class ContextBuilder:
         concerns_str = ", ".join(skin_concerns) if skin_concerns else "Belum disetel"
         joined_str = user.created_at.strftime("%d %B %Y") if user.created_at else "-"
 
-        # Personal Scans
-        user_scans = db.query(SkinScan).filter(SkinScan.user_id == user_id).order_by(desc(SkinScan.created_at)).all()
-        total_scans = len(user_scans)
-        completed_scans = [s for s in user_scans if s.status == "completed"]
+        total_scans = db.query(func.count(SkinScan.id)).filter(SkinScan.user_id == user_id).scalar() or 0
 
-        scan_ids = [s.id for s in user_scans]
-        analyses = db.query(AnalysisResult).filter(AnalysisResult.skin_scan_id.in_(scan_ids)).all() if scan_ids else []
-
-        valid_analyses = [a for a in analyses if a.overall_score is not None]
-        analyzed_count = len(valid_analyses)
+        # One aggregate query for averages (same fallbacks as before:
+        # dark spots -> hyperpigmentation, wrinkles -> texture, when the
+        # primary score is missing/zero).
+        dark_expr = case(
+            (AnalysisResult.dark_spots_score > 0, AnalysisResult.dark_spots_score),
+            else_=AnalysisResult.hyperpigmentation_score,
+        )
+        wr_expr = case(
+            (AnalysisResult.wrinkles_score > 0, AnalysisResult.wrinkles_score),
+            else_=AnalysisResult.texture_score,
+        )
+        agg = (
+            db.query(
+                func.count(AnalysisResult.id),
+                func.avg(AnalysisResult.acne_score),
+                func.avg(AnalysisResult.oily_skin_score),
+                func.avg(AnalysisResult.dry_skin_score),
+                func.avg(dark_expr),
+                func.avg(wr_expr),
+                func.avg(AnalysisResult.overall_score),
+            )
+            .join(SkinScan, AnalysisResult.skin_scan_id == SkinScan.id)
+            .filter(SkinScan.user_id == user_id, AnalysisResult.overall_score.isnot(None))
+            .first()
+        )
+        analyzed_count = int(agg[0] or 0)
 
         if analyzed_count > 0:
-            sum_acne = sum(int(a.acne_score or 0) for a in valid_analyses)
-            sum_oily = sum(int(a.oily_skin_score or 0) for a in valid_analyses)
-            sum_dry = sum(int(a.dry_skin_score or 0) for a in valid_analyses)
-            sum_spots = sum(int(a.dark_spots_score if a.dark_spots_score is not None and a.dark_spots_score > 0 else (a.hyperpigmentation_score or 0)) for a in valid_analyses)
-            sum_wrinkles = sum(int(a.wrinkles_score if a.wrinkles_score is not None and a.wrinkles_score > 0 else (a.texture_score or 0)) for a in valid_analyses)
-            sum_overall = sum(int(a.overall_score or 0) for a in valid_analyses)
+            avg_acne = round(float(agg[1] or 0), 1)
+            avg_oily = round(float(agg[2] or 0), 1)
+            avg_dry = round(float(agg[3] or 0), 1)
+            avg_spots = round(float(agg[4] or 0), 1)
+            avg_wrinkles = round(float(agg[5] or 0), 1)
+            avg_overall = round(float(agg[6] or 0), 1)
 
-            avg_acne = round(sum_acne / analyzed_count, 1)
-            avg_oily = round(sum_oily / analyzed_count, 1)
-            avg_dry = round(sum_dry / analyzed_count, 1)
-            avg_spots = round(sum_spots / analyzed_count, 1)
-            avg_wrinkles = round(sum_wrinkles / analyzed_count, 1)
-            avg_overall = round(sum_overall / analyzed_count, 1)
-
-            # Match exact dashboard tags/status from customer/dashboard.html
             acne_status = "Perlu Treat" if avg_acne > 50 else ("Sedang" if avg_acne > 25 else "Terkontrol")
             oily_status = "Berminyak" if avg_oily > 50 else ("Normal" if avg_oily > 25 else "Kering")
             dry_status = "Dehidrasi" if avg_dry > 50 else ("Normal" if avg_dry > 25 else "Lembap")
@@ -332,17 +346,16 @@ class ContextBuilder:
                 f"   Belum ada riwayat scan wajah yang selesai dianalisis. Total pemindaian: {total_scans} kali."
             )
 
-        # Latest scan info (Matching Dashboard Latest Scan Card)
-        latest_scan = None
-        latest_analysis = None
-        for sc in user_scans:
-            ar = db.query(AnalysisResult).filter(AnalysisResult.skin_scan_id == sc.id).first()
-            if ar and ar.overall_score is not None:
-                latest_scan = sc
-                latest_analysis = ar
-                break
-
-        if latest_scan and latest_analysis and latest_analysis.overall_score is not None:
+        # Latest analysed scan: one query (newest scan that has an analysis).
+        latest_row = (
+            db.query(SkinScan, AnalysisResult)
+            .join(AnalysisResult, AnalysisResult.skin_scan_id == SkinScan.id)
+            .filter(SkinScan.user_id == user_id, AnalysisResult.overall_score.isnot(None))
+            .order_by(desc(SkinScan.created_at))
+            .first()
+        )
+        if latest_row:
+            latest_scan, latest_analysis = latest_row
             l_ov = int(latest_analysis.overall_score or 0)
             l_ac = int(latest_analysis.acne_score or 0)
             l_oi = int(latest_analysis.oily_skin_score or 0)
@@ -364,11 +377,28 @@ class ContextBuilder:
         else:
             latest_scan_section = "3. ANALISIS KONDISI KULIT TERAKHIR:\n   Belum ada scan yang selesai dianalisis."
 
-        # History list (5 recent scans matching dashboard table)
-        recent_scans = user_scans[:5]
+        # Recent 5 scans + their analyses in a single IN query (no per-scan query).
+        recent_scans = (
+            db.query(SkinScan)
+            .filter(SkinScan.user_id == user_id)
+            .order_by(desc(SkinScan.created_at))
+            .limit(5)
+            .all()
+        )
+        recent_ids = [s.id for s in recent_scans]
+        recent_analyses = (
+            db.query(AnalysisResult)
+            .filter(AnalysisResult.skin_scan_id.in_(recent_ids))
+            .all()
+            if recent_ids
+            else []
+        )
+        analysis_by_scan = {}
+        for ar in recent_analyses:
+            analysis_by_scan.setdefault(ar.skin_scan_id, ar)
         history_lines = []
         for sc in recent_scans:
-            ar = db.query(AnalysisResult).filter(AnalysisResult.skin_scan_id == sc.id).first()
+            ar = analysis_by_scan.get(sc.id)
             sc_date = sc.created_at.strftime("%d %b %Y") if sc.created_at else "-"
             sc_score = f"{int(ar.overall_score)}/100" if ar and ar.overall_score is not None else "-"
             history_lines.append(f"   • Scan #{sc.id} | {sc_date} | Skor: {sc_score} | Status: {sc.status.capitalize()}")
@@ -746,6 +776,222 @@ class AIOrchestrator:
         }
         return bool(cleaned and all(w in greeting_set for w in cleaned))
 
+    # ── Speed helpers (2026-11-04): bounded history, gated products, streaming ──
+
+    def _recent_history(self, db: Session, user_id: int):
+        """Last 8 chat messages, newest-first query bounded at the DB (the old
+        code loaded the user's ENTIRE chat history, then sliced in Python)."""
+        records = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.user_id == user_id)
+            .order_by(desc(ChatMessage.created_at))
+            .limit(8)
+            .all()
+        )
+        records = list(reversed(records))
+        lines = []
+        for h in records:
+            sender = "Pengguna" if h.role == "user" else "AI"
+            snippet = h.content.strip().replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(f"{sender}: {snippet}")
+        text = "\n".join(lines)
+        return (text if text else "Belum ada riwayat percakapan sebelumnya.", text)
+
+    def _needs_products(self, message: str, history_raw: str) -> bool:
+        """Product catalog is only sent to the model when the user is actually
+        asking about products (current message or recent conversation). The old
+        code attached the full catalog to EVERY prompt."""
+        if self._is_seeking_product(message):
+            return True
+        return self._is_seeking_product(history_raw)
+
+    def _build_prompt(self, db: Session, user_id: int, message: str, scan_id, role: str, history_str: str, rag_docs) -> str:
+        """Assemble the exact prompt chat() used to build inline, so the
+        streaming and non-streaming paths cannot drift apart."""
+        if role == "admin":
+            admin_db_context = ContextBuilder.build_admin_database_context(db, message)
+            system = ADMIN_SYSTEM_PROMPT.format(
+                admin_db_context=admin_db_context,
+                chat_history=history_str,
+            )
+            return (
+                f"{system}\n\n"
+                f"Instruksi Admin: \"{message}\"\n\n"
+                f"Catatan Penting Gaya Respon:\n"
+                f"- Jawab TO THE POINT, langsung ke inti teknis data/kodingan yang diminta secara padat dan akurat.\n"
+                f"- DILARANG menyapa di awal respon (tanpa 'Halo', 'Hai', dsb.).\n"
+                f"- DILARANG memberikan saran pertanyaan lanjutan di akhir pesan!"
+            )
+        user_context = ContextBuilder.build_user_context(user_id, db, scan_id)
+        need_products = self._needs_products(message, history_str)
+        if need_products:
+            product_context = ContextBuilder.build_product_context(db, message)
+        else:
+            product_context = "Katalog produk tidak diperlukan untuk pertanyaan ini (pengguna tidak meminta rekomendasi produk)."
+        rag_text = "\n".join([f"[{d.get('title', '')}]: {d.get('content', '')}" for d in rag_docs]) if rag_docs else "Tidak ada catatan khusus."
+        system = CUSTOMER_SYSTEM_PROMPT.format(
+            user_context=user_context,
+            chat_history=history_str,
+            product_context=product_context,
+            rag_context=rag_text,
+        )
+        return (
+            f"{system}\n\n"
+            f"Pertanyaan Pengguna: \"{message}\"\n\n"
+            f"ATURAN MUTLAK GAYA RESPONS:\n"
+            f"1. HANYA JAWAB APA YANG DITANYAKAN. Dilarang keras menambahkan penjelasan atau parameter lain di luar konteks pertanyaan!\n"
+            f"2. TO THE POINT, SINGKAT, PADAT, dan NATURAL (cukup 1-3 kalimat). Langsung ke inti jawaban tanpa bertele-tele.\n"
+            f"3. DILARANG MENYAPA DI AWAL RESPON (jangan gunakan 'Halo [Nama]', 'Hai!', dll.) saat menjawab pertanyaan pengguna.\n"
+            f"4. NADA BICARA HARUS RAMAH, NATURAL, dan HANGAT seperti teman yang paham skincare, BUKAN seperti robot kaku.\n"
+            f"5. DILARANG merekomendasikan produk atau mencantumkan link pembelian KECUALI jika pengguna secara eksplisit memintanya.\n"
+            f"6. Jika ditanya rerata kondisi kulit (jerawat, minyak, kekeringan, noda hitam, kerutan), WAJIB dalam format PERSEN (%) yang sinkron dengan dashboard.\n"
+            f"7. Gunakan bahasa netral dan hangat, tanpa ungkapan religius spesifik."
+        )
+
+    @staticmethod
+    def _chunk_sentences(text: str):
+        """Split a complete fallback text into sentence chunks so even the
+        non-Gemini path can be streamed to the user."""
+        if not text:
+            return
+        parts = re.split(r"(?<=[.!?])\s+", text.strip())
+        for part in parts:
+            if part:
+                yield part + " "
+
+    def chat_stream(self, user_id: int, message: str, db: Session, scan_id: Optional[int] = None, role: str = "customer"):
+        """Yield answer text deltas as they are generated (SSE source).
+
+        Speed rules: bounded context (see build_user_context), product catalog
+        only when asked, at most 2 model attempts, SDK streaming (no
+        SDK-then-REST chain per model), 75s wall-clock budget. The full text
+        is saved to history once, at the end, so the stored conversation
+        matches what the user saw (post-filter applied to the saved copy).
+        """
+        guardrail_response = SafetyLayer.check_input(message, role=role)
+        if guardrail_response:
+            self._save_history(user_id, message, guardrail_response, db)
+            yield guardrail_response
+            return
+
+        simulation_mode = SystemSetting.get_value(db, "AI_SIMULATION_MODE", "off")
+        is_pure_greeting = self._is_pure_greeting(message)
+        history_str, _history_raw = self._recent_history(db, user_id)
+        rag_docs = _rag_kb.retrieve(message)
+
+        if simulation_mode == "on":
+            local_resp = SafetyLayer.post_filter(
+                self._generate_local_response(message, db, rag_docs, user_id=user_id, role=role),
+                is_pure_greeting=is_pure_greeting,
+            )
+            self._save_history(user_id, message, local_resp, db)
+            yield from self._chunk_sentences(local_resp)
+            return
+
+        model, _err = self._get_active_model(db)
+        if not model:
+            local_resp = SafetyLayer.post_filter(
+                self._generate_local_response(message, db, rag_docs, user_id=user_id, role=role),
+                is_pure_greeting=is_pure_greeting,
+            )
+            self._save_history(user_id, message, local_resp, db)
+            yield from self._chunk_sentences(local_resp)
+            return
+
+        try:
+            temp_val = float(SystemSetting.get_value(db, "AI_TEMPERATURE", "0.7"))
+            # Cap output: the style rules demand 1-3 sentences; 4096 tokens only
+            # lengthens the worst case. 1024 is still generous.
+            max_tokens_val = min(int(SystemSetting.get_value(db, "AI_MAX_TOKENS", "4096")), 1024)
+            current_model_name = SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite")
+            prompt_input = self._build_prompt(db, user_id, message, scan_id, role, history_str, rag_docs)
+
+            candidates = list(dict.fromkeys([current_model_name, "gemini-3.5-flash-lite"]))[:2]
+            api_key = self.cached_key or SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY)
+            full = ""
+            started = False
+            deadline = time.monotonic() + 75
+
+            for m_name in candidates:
+                try:
+                    if self.model != "httpx":
+                        import google.generativeai as genai
+                        active_m = genai.GenerativeModel(m_name)
+                        stream = active_m.generate_content(
+                            contents=[{"role": "user", "parts": [{"text": prompt_input}]}],
+                            generation_config={
+                                "temperature": temp_val,
+                                "max_output_tokens": max_tokens_val,
+                            },
+                            stream=True,
+                            request_options={"timeout": 10},
+                        )
+                        for chunk in stream:
+                            if time.monotonic() > deadline:
+                                break
+                            try:
+                                text = chunk.text or ""
+                            except Exception:
+                                text = ""
+                            if text:
+                                started = True
+                                full += text
+                                yield text
+                        if started:
+                            break
+                    else:
+                        # No SDK: one REST call, then chunk it (single attempt only).
+                        import httpx
+                        clean_model = m_name if m_name.startswith("models/") else f"models/{m_name}"
+                        url = f"https://generativelanguage.googleapis.com/v1beta/{clean_model}:generateContent?key={api_key}"
+                        resp = httpx.post(
+                            url,
+                            json={
+                                "contents": [{"parts": [{"text": prompt_input}]}],
+                                "generationConfig": {
+                                    "temperature": temp_val,
+                                    "maxOutputTokens": max_tokens_val,
+                                },
+                            },
+                            timeout=12.0,
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            cands = data.get("candidates", [])
+                            if cands:
+                                parts = cands[0].get("content", {}).get("parts", [])
+                                if parts and parts[0].get("text"):
+                                    full = parts[0]["text"]
+                                    started = True
+                                    yield from self._chunk_sentences(full)
+                                    break
+                except Exception as model_err:
+                    logger.info(f"Stream model {m_name} failed ({model_err}); {'keeping partial answer' if started else 'trying next candidate'}...")
+                    if started:
+                        break
+                    continue
+
+            if not full:
+                logger.warning("All stream candidates failed. Falling back to local catalog matcher.")
+                full = SafetyLayer.post_filter(
+                    self._generate_local_response(message, db, rag_docs, user_id=user_id, role=role),
+                    is_pure_greeting=is_pure_greeting,
+                )
+                yield from self._chunk_sentences(full)
+            else:
+                full = SafetyLayer.post_filter(full, is_pure_greeting=is_pure_greeting)
+            self._save_history(user_id, message, full, db)
+        except Exception as e:
+            logger.error(f"Gemini stream error: {e}. Falling back to local catalog matcher.")
+            local_resp = SafetyLayer.post_filter(
+                self._generate_local_response(message, db, rag_docs, user_id=user_id, role=role),
+                is_pure_greeting=is_pure_greeting,
+            )
+            self._save_history(user_id, message, local_resp, db)
+            yield from self._chunk_sentences(local_resp)
+
     def chat(self, user_id: int, message: str, db: Session, scan_id: Optional[int] = None, role: str = "customer") -> str:
         """
         Main entry point for AI chat with persistent memory per user account and role awareness.
@@ -760,21 +1006,8 @@ class AIOrchestrator:
         simulation_mode = SystemSetting.get_value(db, "AI_SIMULATION_MODE", "off")
         is_pure_greeting = self._is_pure_greeting(message)
 
-        # 2. Build conversation memory context from database
-        history_records = db.query(ChatMessage).filter(
-            ChatMessage.user_id == user_id
-        ).order_by(ChatMessage.created_at.asc()).all()
-
-        recent_history = history_records[-8:] if len(history_records) > 8 else history_records
-        history_lines = []
-        for h in recent_history:
-            sender = "Pengguna" if h.role == "user" else "AI"
-            snippet = h.content.strip().replace("\n", " ")
-            if len(snippet) > 200:
-                snippet = snippet[:200] + "..."
-            history_lines.append(f"{sender}: {snippet}")
-
-        chat_history_str = "\n".join(history_lines) if history_lines else "Belum ada riwayat percakapan sebelumnya."
+        # 2. Build conversation memory context from database (bounded: last 8).
+        chat_history_str, _history_raw = self._recent_history(db, user_id)
 
         # 3. Retrieve RAG documents
         rag_docs = _rag_kb.retrieve(message)
@@ -797,59 +1030,30 @@ class AIOrchestrator:
         try:
             import google.generativeai as genai
             
-            # 5. Read dynamic generation parameters
+            # 5. Read dynamic generation parameters (output capped: the style
+            # rules demand 1-3 sentences, so 4096 tokens only lengthens the
+            # worst case; 1024 is still generous).
             temp_val = float(SystemSetting.get_value(db, "AI_TEMPERATURE", "0.7"))
-            max_tokens_val = int(SystemSetting.get_value(db, "AI_MAX_TOKENS", "4096"))
+            max_tokens_val = min(int(SystemSetting.get_value(db, "AI_MAX_TOKENS", "4096")), 1024)
             current_model_name = SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite")
 
-            # 6. Build system prompt based on role
-            if role == "admin":
-                admin_db_context = ContextBuilder.build_admin_database_context(db, message)
-                system = ADMIN_SYSTEM_PROMPT.format(
-                    admin_db_context=admin_db_context,
-                    chat_history=chat_history_str
-                )
-            else:
-                user_context = ContextBuilder.build_user_context(user_id, db, scan_id)
-                product_context = ContextBuilder.build_product_context(db, message)
-                rag_text = "\n".join([f"[{d.get('title', '')}]: {d.get('content', '')}" for d in rag_docs]) if rag_docs else "Tidak ada catatan khusus."
-                system = CUSTOMER_SYSTEM_PROMPT.format(
-                    user_context=user_context,
-                    chat_history=chat_history_str,
-                    product_context=product_context,
-                    rag_context=rag_text,
-                )
+            # 6. Build prompt (shared with the streaming path; product catalog
+            # only attached when the user is actually asking about products).
+            prompt_input = self._build_prompt(db, user_id, message, scan_id, role, chat_history_str, rag_docs)
 
-            # 7. Call Google Gemini with graceful fallback across supported models
-            candidate_models = list(dict.fromkeys([current_model_name, "gemini-3.5-flash-lite", "gemini-3.8-flash"]))
+            # 7. Call Google Gemini: at most 2 models, SDK only. The old code
+            # tried 3 models x (SDK 10s + REST 12s) = up to ~66s of serial
+            # waiting before answering; the REST chain is gone. When the SDK
+            # is unavailable (model == "httpx"), a single REST attempt on the
+            # configured model is kept as the only fallback.
+            candidate_models = list(dict.fromkeys([current_model_name, "gemini-3.5-flash-lite"]))[:2]
+            if self.model == "httpx":
+                candidate_models = candidate_models[:1]
             ai_text = None
 
             api_key = self.cached_key or SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY)
             for m_name in candidate_models:
                 try:
-                    if role == "admin":
-                        prompt_input = (
-                            f"{system}\n\n"
-                            f"Instruksi Admin: \"{message}\"\n\n"
-                            f"Catatan Penting Gaya Respon:\n"
-                            f"- Jawab TO THE POINT, langsung ke inti teknis data/kodingan yang diminta secara padat dan akurat.\n"
-                            f"- DILARANG menyapa di awal respon (tanpa 'Halo', 'Hai', dsb.).\n"
-                            f"- DILARANG memberikan saran pertanyaan lanjutan di akhir pesan!"
-                        )
-                    else:
-                        prompt_input = (
-                            f"{system}\n\n"
-                            f"Pertanyaan Pengguna: \"{message}\"\n\n"
-                            f"ATURAN MUTLAK GAYA RESPONS:\n"
-                            f"1. HANYA JAWAB APA YANG DITANYAKAN. Dilarang keras menambahkan penjelasan atau parameter lain di luar konteks pertanyaan!\n"
-                            f"2. TO THE POINT, SINGKAT, PADAT, dan NATURAL (cukup 1-3 kalimat). Langsung ke inti jawaban tanpa bertele-tele.\n"
-                            f"3. DILARANG MENYAPA DI AWAL RESPON (jangan gunakan 'Halo [Nama]', 'Hai!', dll.) saat menjawab pertanyaan pengguna.\n"
-                            f"4. NADA BICARA HARUS RAMAH, NATURAL, dan HANGAT seperti teman yang paham skincare, BUKAN seperti robot kaku.\n"
-                            f"5. DILARANG merekomendasikan produk atau mencantumkan link pembelian KECUALI jika pengguna secara eksplisit memintanya.\n"
-                            f"6. Jika ditanya rerata kondisi kulit (jerawat, minyak, kekeringan, noda hitam, kerutan), WAJIB dalam format PERSEN (%) yang sinkron dengan dashboard.\n"
-                            f"7. Gunakan bahasa netral dan hangat, tanpa ungkapan religius spesifik."
-                        )
-
                     # 1. Try SDK if available and not set to pure httpx
                     if self.model != "httpx":
                         try:
@@ -867,9 +1071,16 @@ class AIOrchestrator:
                                 ai_text = response.text
                                 break
                         except Exception as sdk_err:
-                            logger.info(f"SDK generation failed for {m_name} ({sdk_err}), trying HTTPX REST API...")
+                            logger.info(f"SDK generation failed for {m_name} ({sdk_err}).")
+                            if self.model != "httpx":
+                                # Speed rule: no SDK-then-REST chain per model.
+                                # Try the next candidate instead of stacking
+                                # another 12s REST wait on a failing model.
+                                continue
 
-                    # 2. REST API fallback via httpx (universal fallback)
+                    # 2. REST API fallback via httpx — only when the SDK is
+                    # unavailable (model == "httpx"); then it is the sole
+                    # attempt on the single configured model (see above).
                     import httpx
                     clean_model = m_name if m_name.startswith("models/") else f"models/{m_name}"
                     url = f"https://generativelanguage.googleapis.com/v1beta/{clean_model}:generateContent?key={api_key}"

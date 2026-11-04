@@ -35,7 +35,7 @@ import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
@@ -876,6 +876,49 @@ async def assistant_chat(
     except Exception as e:
         logger.error("AI assistant chat error: %s", e)
         return JSONResponse(status_code=500, content={"detail": "Terjadi kesalahan pada layanan AI."})
+
+
+@router.post("/assistant/chat/stream")
+def assistant_chat_stream(request: Request, payload: AssistantChatIn, db: Session = Depends(get_db)):
+    """Streaming chat (SSE): the first tokens reach the browser as soon as
+    Gemini starts generating, instead of waiting for the full reply.
+
+    Sync route (not async): the generator does blocking Gemini/DB work, and
+    FastAPI runs sync routes + sync iterators in its threadpool, so the DB
+    session stays usable for the whole stream. The session dependency is
+    closed only after the stream finishes, which is also when history is
+    saved (inside chat_stream).
+    """
+    user = _require_session(request)
+    message = payload.message.strip()
+    if not message:
+        return JSONResponse(status_code=400, content={"detail": "Pesan tidak boleh kosong."})
+    if len(message) > 2000:
+        return JSONResponse(status_code=400, content={"detail": "Pesan terlalu panjang (maksimal 2000 karakter)."})
+
+    from app.services.ai_assistant_service import assistant
+
+    def event_gen():
+        try:
+            for delta in assistant.chat_stream(
+                user_id=user["id"],
+                message=message,
+                db=db,
+                scan_id=payload.scan_id,
+                role=user.get("role", "customer"),
+            ):
+                if delta:
+                    yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+            yield "data: {\"done\": true}\n\n"
+        except Exception as e:
+            logger.error("AI assistant stream error: %s", e)
+            yield f"data: {json.dumps({'error': 'Terjadi kesalahan pada layanan AI.'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/assistant/history")
