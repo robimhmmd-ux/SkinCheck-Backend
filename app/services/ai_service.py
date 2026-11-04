@@ -407,14 +407,19 @@ class KerasComputerVisionProvider(AIProviderInterface):
         4. Crops, applies CLAHE, normalizes, and runs single-pass batch inference on VGG16.
         5. Aggregates scores (peak 35% for localized blemishes, mean for dry skin).
         """
+        if not image_paths:
+            raise ValueError("Daftar frame gambar tidak boleh kosong.")
+
         if not self.model:
             self._load_model()
             if not self.model:
                 logger.info("Local VGG16 model not loaded; delegating to Modal.com AI...")
-                return self._call_modal_analyze(image_path)
-
-        if not image_paths:
-            raise ValueError("Daftar frame gambar tidak boleh kosong.")
+                # Modal hanya menerima satu gambar, jadi delegasikan frame
+                # pertama. (Dulu tertulis image_path — variabel itu tidak
+                # ada di fungsi ini, sehingga setiap scan multi-frame lewat
+                # backend tanpa model lokal selalu gagal NameError sebelum
+                # YuNet sempat jalan.)
+                return self._call_modal_analyze(image_paths[0])
 
         import cv2
 
