@@ -320,6 +320,12 @@ class KerasComputerVisionProvider(AIProviderInterface):
                     "overall_score": data["overall_score"],
                     "confidence": data.get("confidence", 0.92),
                     "frames_analyzed": 1,
+                    # Modal menganalisis 1 frame (yang dikirim) — dan di sisi
+                    # Modal frame itu sudah lolos YuNet lalu diprediksi VGG.
+                    # Tanpa dua key ini, halaman scan memakai default 0 dan
+                    # statistiknya tampil 0/0 padahal analisisnya berhasil.
+                    "frames_passed_yunet": 1,
+                    "frames_used_vgg": 1,
                     "analysis_status": "success",
                 }
         except httpx.HTTPError as e:
