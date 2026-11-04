@@ -34,7 +34,7 @@ import json
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -686,7 +686,10 @@ async def scan_upload(
 
 @router.post("/scan/multi-upload", status_code=201)
 async def scan_multi_upload(
-    request: Request, files: List[UploadFile] = File(...), db: Session = Depends(get_db)
+    request: Request,
+    files: List[UploadFile] = File(...),
+    poses: List[str] = Form([]),
+    db: Session = Depends(get_db),
 ):
     """Synchronous multi-frame upload and multi-pose AI skin analysis.
 
@@ -708,13 +711,20 @@ async def scan_multi_upload(
 
     from app.services.image_service import ImageService
 
+    # Label pose sejajar dengan urutan file; kalau jumlahnya tidak cocok,
+    # label diabaikan (provider mengelompokkan semua frame jadi satu grup).
+    # Frame yang gagal validasi dilewati bersama labelnya supaya urutan
+    # frame dan label tidak bergeser.
+    poses_aligned = poses if len(poses) == len(files) else [None] * len(files)
     saved_filenames = []
     saved_abs_paths = []
-    for f in files:
+    saved_poses = []
+    for f, pose in zip(files, poses_aligned):
         try:
             fname = await ImageService.process_and_save_scan(f)
             saved_filenames.append(fname)
             saved_abs_paths.append(str(ImageService.get_image_path(fname)))
+            saved_poses.append(pose)
         except Exception as e:  # noqa: BLE001
             logger.debug("Frame validation skipped: %s", e)
             continue
@@ -748,7 +758,7 @@ async def scan_multi_upload(
         from app.services.ai_service import KerasComputerVisionProvider
 
         provider = KerasComputerVisionProvider()
-        ai_data = provider.analyze_multi_frame_skin_condition(saved_abs_paths)
+        ai_data = provider.analyze_multi_frame_skin_condition(saved_abs_paths, saved_poses)
 
         analysis_result = AnalysisResult(
             skin_scan_id=scan.id,
@@ -790,6 +800,8 @@ async def scan_multi_upload(
         "frames_captured": len(files),
         "frames_passed_yunet": ai_data.get("frames_passed_yunet", 0),
         "frames_used_vgg": ai_data.get("frames_used_vgg", 0),
+        "per_pose": ai_data.get("per_pose", {}),
+        "statements": ai_data.get("statements", []),
         "is_guest": user.get("is_guest", False),
     }
     if scan.status == "completed":

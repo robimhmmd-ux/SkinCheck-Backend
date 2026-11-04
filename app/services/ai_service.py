@@ -253,6 +253,92 @@ class MockComputerVisionProvider(AIProviderInterface):
         return result
 
 
+# Label pose yang dikirim frontend saat perekaman multi-pose, dipakai
+# untuk pernyataan perbandingan (bukan estimasi YuNet — di backend live
+# tanpa model lokal, YuNet tidak jalan, jadi label instruksi inilah yang
+# menjadi pengelompoknya). Key yang tidak dikenal tampil apa adanya.
+POSE_LABELS_ID = {
+    "center": "Hadap Depan",
+    "left": "Pipi Kiri",
+    "right": "Pipi Kanan",
+    "up": "Area Dagu",
+    "down": "Area Dahi",
+    "close": "Detail Tekstur",
+    "far": "Jarak Jauh",
+    "all": "Semua frame",
+}
+
+_CONDITION_LABELS_ID = [
+    ("acne_score", "jerawat"),
+    ("dry_skin_score", "kulit kering"),
+    ("oily_skin_score", "kulit berminyak"),
+    ("dark_spots_score", "flek hitam"),
+    ("wrinkles_score", "kerutan"),
+]
+
+
+def _aggregate_modal_scores(results):
+    """Agregasi skor dari beberapa frame Modal, rumusnya sama seperti
+    jalur lokal: peak 35% untuk jerawat, flek hitam, kerutan, dan kulit
+    berminyak; rata-rata untuk kulit kering."""
+    def peak(vals):
+        if len(vals) == 1:
+            return float(vals[0])
+        ordered = sorted(vals)
+        k = max(1, int(np.ceil(len(ordered) * 0.35)))
+        return float(np.mean(ordered[-k:]))
+
+    acne = round(peak([r["acne_score"] for r in results]), 1)
+    dark = round(peak([r["dark_spots_score"] for r in results]), 1)
+    wrinkles = round(peak([r["wrinkles_score"] for r in results]), 1)
+    dry = round(float(np.mean([r["dry_skin_score"] for r in results])), 1)
+    oily = round(peak([r["oily_skin_score"] for r in results]), 1)
+    avg_severity = (acne + dry + oily + dark + wrinkles) / 5.0
+    return {
+        "acne_score": acne,
+        "dry_skin_score": dry,
+        "oily_skin_score": oily,
+        "dark_spots_score": dark,
+        "wrinkles_score": wrinkles,
+        "redness_score": 0.0,
+        "texture_score": wrinkles,
+        "hyperpigmentation_score": dark,
+        "overall_score": max(0.0, min(100.0, round(100.0 - avg_severity, 1))),
+        "confidence": round(sum(r.get("confidence", 0.92) for r in results) / len(results), 2),
+    }
+
+
+def _build_pose_statements(per_pose, overall_score, total_passed):
+    """Pernyataan perbandingan antar pose, murni komparatif: pose mana
+    yang skornya tertinggi/terendah. Bukan diagnosis wilayah presisi —
+    satu pose adalah foto seluruh wajah dari sudut itu, bukan crop
+    wilayah tersebut saja."""
+    statements = [
+        f"Rata-rata keseluruhan dari {total_passed} frame yang berhasil dianalisis: skor keseluruhan {overall_score}%."
+    ]
+    scored = {k: v for k, v in per_pose.items() if v.get("overall_score") is not None}
+    if len(scored) < 2:
+        return statements
+    spreads = []
+    for key, label in _CONDITION_LABELS_ID:
+        vals = [(v[key], k) for k, v in scored.items() if v.get(key) is not None]
+        if len(vals) < 2:
+            continue
+        top_val, top_pose = max(vals)
+        low_val, low_pose = min(vals)
+        spreads.append((top_val - low_val, label, top_pose, top_val, low_pose, low_val))
+    spreads.sort(key=lambda s: s[0], reverse=True)
+    for spread, label, top_pose, top_val, low_pose, low_val in spreads[:2]:
+        if spread < 1:
+            continue
+        statements.append(
+            f"Skor {label} paling tinggi terlihat pada pose "
+            f"{POSE_LABELS_ID.get(top_pose, top_pose)} ({top_val}%), paling rendah "
+            f"pada pose {POSE_LABELS_ID.get(low_pose, low_pose)} ({low_val}%)."
+        )
+    return statements
+
+
 class KerasComputerVisionProvider(AIProviderInterface):
     """
     Real AI Provider that combines YuNet (Face Detection) + VGG16 (Skin Analysis).
@@ -332,6 +418,86 @@ class KerasComputerVisionProvider(AIProviderInterface):
             logger.error(f"Modal AI endpoint request error: {e}")
             raise RuntimeError(f"Gagal menghubungi server AI Modal: {e}")
 
+    def _modal_per_pose_analysis(self, image_paths: list[str], poses) -> dict:
+        """Fallback Modal per pose: panggil /analyze untuk tiap frame
+        (paralel, 4 worker), kelompokkan hasilnya menurut label pose yang
+        dikirim frontend, agregasi per pose, lalu agregasi keseluruhan.
+        Frame tanpa wajah (422 dari Modal) dilewati; kalau Modal tidak
+        bisa dihubungi sama sekali, errornya diteruskan apa adanya supaya
+        scan gagal dengan jujur, bukan dengan skor sebagian yang diam-diam
+        tidak lengkap. Jalur lokal tidak memakai ini — di sana pose
+        diestimasi YuNet dan inferensi jalan batch."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        if poses is not None and len(poses) == len(image_paths):
+            grouped = {}
+            for path, pose in zip(image_paths, poses):
+                grouped.setdefault(pose or "all", []).append(path)
+        else:
+            grouped = {"all": list(image_paths)}
+
+        def _run(item):
+            pose_key, path = item
+            try:
+                return pose_key, self._call_modal_analyze(path), None
+            except Exception as e:  # noqa: BLE001 - diklasifikasi pemanggil
+                return pose_key, None, e
+
+        items = [(k, p) for k, paths in grouped.items() for p in paths]
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            outcomes = list(ex.map(_run, items))
+
+        grouped_results = {k: [] for k in grouped}
+        first_runtime_error = None
+        first_unexpected_error = None
+        for pose_key, result, err in outcomes:
+            if result is not None:
+                grouped_results[pose_key].append(result)
+            elif isinstance(err, RuntimeError):
+                if first_runtime_error is None:
+                    first_runtime_error = err
+            elif not isinstance(err, ValueError):
+                if first_unexpected_error is None:
+                    first_unexpected_error = err
+            # ValueError = frame tanpa wajah (422): frame dilewati saja.
+
+        per_pose = {}
+        all_results = []
+        for pose_key, paths in grouped.items():
+            results = grouped_results[pose_key]
+            if results:
+                entry = _aggregate_modal_scores(results)
+                entry["frames_captured"] = len(paths)
+                entry["frames_passed"] = len(results)
+                per_pose[pose_key] = entry
+                all_results.extend(results)
+            else:
+                per_pose[pose_key] = {
+                    "acne_score": None, "dry_skin_score": None, "oily_skin_score": None,
+                    "dark_spots_score": None, "wrinkles_score": None, "redness_score": None,
+                    "texture_score": None, "hyperpigmentation_score": None, "overall_score": None,
+                    "confidence": None, "frames_captured": len(paths), "frames_passed": 0,
+                }
+
+        if not all_results:
+            if first_runtime_error is not None:
+                raise first_runtime_error
+            if first_unexpected_error is not None:
+                raise first_unexpected_error
+            raise ValueError("Tidak terdeteksi wajah pada frame yang direkam. Ulangi scan dengan wajah menghadap kamera.")
+
+        overall = _aggregate_modal_scores(all_results)
+        overall.update({
+            "frames_analyzed": len(all_results),
+            "frames_captured": len(image_paths),
+            "frames_passed_yunet": len(all_results),
+            "frames_used_vgg": len(all_results),
+            "per_pose": per_pose,
+            "statements": _build_pose_statements(per_pose, overall["overall_score"], len(all_results)),
+            "analysis_status": "success",
+        })
+        return overall
+
     def detect_face(self, image_path: str) -> bool:
         """Validates face presence using real YuNet face detector."""
         return self.yunet.detect_face(image_path)
@@ -404,7 +570,7 @@ class KerasComputerVisionProvider(AIProviderInterface):
             "analysis_status": "success",
         }
 
-    def analyze_multi_frame_skin_condition(self, image_paths: list[str]) -> dict:
+    def analyze_multi_frame_skin_condition(self, image_paths: list[str], poses=None) -> dict:
         """
         Analyzes multi-frame capture (e.g. 60-second webcam stream):
         1. Runs YuNet on each frame, filters out non-face and tiny faces.
@@ -412,6 +578,10 @@ class KerasComputerVisionProvider(AIProviderInterface):
         3. Samples top 1-2 highest confidence frames per pose (12-20 frames total).
         4. Crops, applies CLAHE, normalizes, and runs single-pass batch inference on VGG16.
         5. Aggregates scores (peak 35% for localized blemishes, mean for dry skin).
+
+        `poses` adalah label pose per frame dari frontend (sejajar dengan
+        image_paths). Label ini hanya dipakai jalur delegasi Modal di
+        bawah; jalur lokal tetap memakai estimasi pose YuNet.
         """
         if not image_paths:
             raise ValueError("Daftar frame gambar tidak boleh kosong.")
@@ -419,13 +589,8 @@ class KerasComputerVisionProvider(AIProviderInterface):
         if not self.model:
             self._load_model()
             if not self.model:
-                logger.info("Local VGG16 model not loaded; delegating to Modal.com AI...")
-                # Modal hanya menerima satu gambar, jadi delegasikan frame
-                # pertama. (Dulu tertulis image_path — variabel itu tidak
-                # ada di fungsi ini, sehingga setiap scan multi-frame lewat
-                # backend tanpa model lokal selalu gagal NameError sebelum
-                # YuNet sempat jalan.)
-                return self._call_modal_analyze(image_paths[0])
+                logger.info("Local VGG16 model not loaded; delegating to Modal.com AI per pose...")
+                return self._modal_per_pose_analysis(image_paths, poses)
 
         import cv2
 
