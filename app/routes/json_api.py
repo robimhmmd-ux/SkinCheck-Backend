@@ -538,6 +538,50 @@ async def me(request: Request):
     return JSONResponse(content={"user": user})
 
 
+class ProfileNameUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None  # diterima tapi tidak pernah diubah
+
+
+@router.patch("/profile")
+async def update_my_profile(
+    request: Request, body: ProfileNameUpdate, db: Session = Depends(get_db)
+):
+    """Ubah nama akun sendiri. Email TIDAK dapat diubah lewat endpoint ini:
+    permintaan yang membawa email berbeda dari email saat ini ditolak 400
+    (bukan diabaikan diam-diam), supaya aturannya ditegakkan server-side
+    dan tidak bisa diakali dari client."""
+    user = _require_session(request)
+    try:
+        db_user = db.query(User).filter(User.id == user["id"]).first()
+        if not db_user:
+            return JSONResponse(status_code=404, content={"detail": "Akun tidak ditemukan."})
+        if body.email is not None and body.email != db_user.email:
+            return JSONResponse(
+                status_code=400, content={"detail": "Email tidak dapat diubah."}
+            )
+        if body.name is not None:
+            name = body.name.strip()
+            if not name:
+                return JSONResponse(
+                    status_code=400, content={"detail": "Nama tidak boleh kosong."}
+                )
+            db_user.name = name
+        db.commit()
+        db.refresh(db_user)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("profile update failed: %s", e)
+        db.rollback()
+        return _db_unavailable()
+    # Segarkan sesi supaya getMe langsung menampilkan nama baru.
+    sess = request.session.get("user")
+    if isinstance(sess, dict):
+        sess["name"] = db_user.name
+        request.session["user"] = sess
+    _log_activity(db, request, db_user.id, "Customer memperbarui profilnya")
+    return JSONResponse(content={"user": _user_dict(db_user)})
+
+
 # ---------------------------------------------------------------------------
 # Customer: dashboard / history / scan
 # ---------------------------------------------------------------------------

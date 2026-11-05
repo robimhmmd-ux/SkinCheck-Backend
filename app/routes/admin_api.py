@@ -1152,14 +1152,19 @@ async def admin_update_profile(
         user = db.query(User).filter(User.id == admin["id"]).first()
         if not user:
             return JSONResponse(status_code=404, content={"detail": "Akun admin tidak ditemukan."})
+        # Email TIDAK dapat diubah (aturan produk): permintaan mengubah
+        # email ditolak 400, bukan diabaikan diam-diam.
         if body.email is not None and body.email != user.email:
-            if db.query(User).filter(User.email == body.email).first():
-                return JSONResponse(
-                    status_code=400, content={"detail": "Email sudah dipakai akun lain."}
-                )
-            user.email = body.email
+            return JSONResponse(
+                status_code=400, content={"detail": "Email tidak dapat diubah."}
+            )
         if body.name is not None:
-            user.name = body.name.strip()
+            name = body.name.strip()
+            if not name:
+                return JSONResponse(
+                    status_code=400, content={"detail": "Nama tidak boleh kosong."}
+                )
+            user.name = name
         if body.new_password:
             if not body.old_password or not verify_password(
                 body.old_password, user.password_hash
@@ -1179,5 +1184,10 @@ async def admin_update_profile(
         logger.warning("admin profile update failed: %s", e)
         db.rollback()
         return _db_unavailable()
+    # Segarkan sesi supaya getMe langsung menampilkan nama baru.
+    sess = request.session.get("user")
+    if isinstance(sess, dict):
+        sess["name"] = user.name
+        request.session["user"] = sess
     _log_activity(db, request, admin["id"], "Admin memperbarui profilnya")
     return JSONResponse(content=_admin_user_dict(user))
