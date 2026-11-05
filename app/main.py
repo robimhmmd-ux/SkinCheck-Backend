@@ -31,7 +31,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import settings
 from app.middleware.auth_guard import AuthException
-from app.routes import api_router, json_api_router
+from app.routes import admin_api_router, api_router, json_api_router
 
 
 def _frontend_origins() -> list[str]:
@@ -125,6 +125,7 @@ def create_app() -> FastAPI:
 
     # JSON routers only. No static mount, no HTML routers.
     app.include_router(json_api_router)
+    app.include_router(admin_api_router)
     app.include_router(api_router)
 
     @app.get("/favicon.ico", include_in_schema=False)

@@ -2,6 +2,8 @@
 
 Only JSON routers are mounted by ``app.main``:
 - ``json_api_router`` — /api/v2, the API for the Next.js frontend.
+- ``admin_api_router`` — /api/v2/admin/*, admin-only JSON endpoints
+  (adapted from the monolith's admin_controller logic, no templates).
 - ``api_router`` — /api/v1/health, kept from the monolith (no templates).
 
 Legacy HTML routers (home_routes, auth_routes, customer_routes,
@@ -13,10 +15,12 @@ template rendering. Do not re-add them to this file without restoring
 the template layer.
 """
 
+from .admin_api import router as admin_api_router
 from .api_routes import router as api_router
 from .json_api import router as json_api_router
 
 __all__ = [
     "json_api_router",
     "api_router",
+    "admin_api_router",
 ]

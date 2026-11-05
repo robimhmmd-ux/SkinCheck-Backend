@@ -46,6 +46,7 @@ from app.models.activity_log import ActivityLog
 from app.models.analysis_result import AnalysisResult
 from app.models.product import Product
 from app.models.skin_scan import SkinScan
+from app.models.system_setting import SystemSetting
 from app.models.user import User
 from app.utils.auth import get_password_hash, verify_password
 
@@ -185,6 +186,50 @@ def _log_activity(db: Session, request: Request, user_id: int, label: str) -> No
     except Exception as e:  # noqa: BLE001 - logging must not break auth
         logger.warning("Failed to record activity log: %s", e)
         db.rollback()
+
+
+def _scan_gates(request: Request, db: Session, user: dict):
+    """Return an error JSONResponse when a scan upload must be refused.
+
+    Two admin-controlled gates (system_settings, read per request):
+    - Maintenance mode (MAINTENANCE_MODE on/true/1): customer uploads
+      are refused with 503. Admins are exempt from this block (they hit
+      the customer-only role check below as before).
+    - Daily quota (SCAN_DAILY_QUOTA positive int): logged-in customers
+      are limited to that many scan rows created today (UTC day, matching
+      the UTC storage). Unset/empty/non-positive = unlimited, so current
+      customer behaviour is unchanged by default. Guest fallback (id=1)
+      is exempt from quota — counting all guests together would lock the
+      demo path for everyone after N scans.
+    """
+    try:
+        maintenance = (SystemSetting.get_value(db, "MAINTENANCE_MODE", "off") or "").strip().lower()
+        if maintenance in ("on", "true", "1") and user.get("role") != "admin":
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Sistem sedang dalam mode pemeliharaan. Coba lagi nanti."},
+            )
+        if not user.get("is_guest"):
+            raw_quota = (SystemSetting.get_value(db, "SCAN_DAILY_QUOTA", "") or "").strip()
+            try:
+                quota = int(raw_quota) if raw_quota else 0
+            except ValueError:
+                quota = 0
+            if quota > 0:
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                used = (
+                    db.query(SkinScan)
+                    .filter(SkinScan.user_id == user["id"], SkinScan.created_at >= today_start)
+                    .count()
+                )
+                if used >= quota:
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": f"Kuota scan harian tercapai ({quota} scan/hari). Coba lagi besok."},
+                    )
+    except Exception as e:  # noqa: BLE001 - gate failure must not break uploads
+        logger.warning("scan gates check failed (allowing upload): %s", e)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +646,10 @@ async def scan_upload(
         user = {"id": 1, "name": "Tester", "role": "customer", "is_guest": True}
     elif user.get("role") != "customer":
         raise _forbidden("Upload scan ini untuk customer.")
+    # Admin-controlled gates (maintenance mode / daily quota).
+    gate_error = _scan_gates(request, db, user)
+    if gate_error is not None:
+        return gate_error
     # Imported here (not at module level) so a missing Pillow install
     # fails only this endpoint, not the whole app import.
     from app.services.image_service import ImageService, ImageValidationException
@@ -720,6 +769,10 @@ async def scan_multi_upload(
         user = {"id": 1, "name": "Tester", "role": "customer", "is_guest": True}
     elif user.get("role") != "customer":
         raise _forbidden("Upload scan ini untuk customer.")
+    # Admin-controlled gates (maintenance mode / daily quota).
+    gate_error = _scan_gates(request, db, user)
+    if gate_error is not None:
+        return gate_error
     if not files:
         return JSONResponse(
             status_code=400, content={"detail": "Minimal 1 frame foto harus diunggah."}
