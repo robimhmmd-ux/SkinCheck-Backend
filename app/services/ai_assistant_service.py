@@ -425,7 +425,7 @@ class ContextBuilder:
         )
 
     @staticmethod
-    def build_admin_database_context(db: Session, query: str = "") -> str:
+    def build_admin_database_context(db: Session, query: str = "", admin_user: Optional[dict] = None) -> str:
         """
         Builds a comprehensive live snapshot of the entire SkinCheck database for Admin queries.
         Includes:
@@ -434,6 +434,8 @@ class ContextBuilder:
         - Disease and skin condition trends across all users (AnalysisResult platform averages)
         - Customer chat inquiries, complaints, and requests trends (extracted from ChatMessage where User.role == 'customer')
         - Feed of recent customer inquiries for direct analysis by Luvenna
+        - Identity of the logged-in admin (section 0), so "siapa saya" is never
+          answered with a scan ID or a made-up ID.
         """
         try:
             from datetime import date
@@ -560,9 +562,22 @@ class ContextBuilder:
                 if "KEY" not in s.key.upper() and "SECRET" not in s.key.upper() and "PASSWORD" not in s.key.upper()
             ])
 
+            # 0. Identitas admin yang sedang chat (supaya "siapa saya" dijawab
+            # dari data akun yang benar, bukan dari ID scan di daftar bawah).
+            identity_block = ""
+            if admin_user:
+                identity_block = (
+                    "0. YANG SEDANG CHAT DENGANMU (ADMIN YANG LOGIN):\n"
+                    f"   - Nama: {admin_user.get('name')}\n"
+                    f"   - ID pengguna: #{admin_user.get('id')}  <- INI id admin yang sedang chat. "
+                    "ID scan (mis. #120001) BUKAN id orang, jangan pernah dipakai sebagai id siapa pun.\n"
+                    f"   - Email: {admin_user.get('email')}\n"
+                    "   - Role: admin\n\n"
+                )
+
             return f"""
 DATABASE WEBSITE SKINCHECK (LIVE REPOSITORY SNAPSHOT FOR ADMIN):
-1. TAMPILAN KARTU METRIK DASHBOARD ADMIN (REAL-TIME UI WIDGETS):
+{identity_block}1. TAMPILAN KARTU METRIK DASHBOARD ADMIN (REAL-TIME UI WIDGETS):
    - Total Customer: {total_customers} orang ({active_customers} Aktif)
    - Face Scans: {total_scans} pemindaian ({scans_today} hari ini)
    - Katalog Produk: {active_products} produk aktif di katalog AI
@@ -632,20 +647,21 @@ DATABASE WEBSITE SKINCHECK (LIVE REPOSITORY SNAPSHOT FOR ADMIN):
 
 _rag_kb = RAGKnowledgeBase()
 
-ADMIN_SYSTEM_PROMPT = """Kamu adalah Luvenna (Ven) AI, asisten cerdas sistem SkinCheck.
-Pengguna yang sedang berinteraksi denganmu saat ini adalah ADMINISTRATOR SISTEM WEBSITE.
+ADMIN_SYSTEM_PROMPT = """Kamu adalah Luvenna (Ven), asisten Laomera (SkinCheck). Yang lagi ngobrol sama kamu sekarang adalah ADMIN website ini — bukan customer biasa.
 
-🛠️ HAK AKSES DAN KEBEBASAN PERCAKAPAN KHUSUS ADMINISTRATOR (ZERO RESTRICTIONS):
-1. TANPA BATASAN TOPIK: Untuk Administrator, kamu TIDAK DIBATASI pada topik kesehatan atau skincare saja. Admin bebas menanyakan, meminta bantuan, atau memerintahkan apa pun (kodingan, database, troubleshooting, analitik, dsb.).
-2. AKSES PENUH KE SELURUH DATABASE WEBSITE: Kamu memiliki hak membaca dan menganalisis seluruh data website SkinCheck pada live snapshot di bawah.
-3. SINKRONISASI TAMPILAN DASHBOARD ADMIN: Metrik sistem disajikan real-time dan sinkron dengan kartu metrik dashboard admin.
+🎯 GAYA JAWABAN (SAMA NATURALNYA SEPERTI KE CUSTOMER):
+1. NATURAL & RAMAH, BUKAN SEPERTI ROBOT: ngobrol santai layaknya rekan kerja yang paham website ini. Jangan pakai gaya laporan sistem ("Sistem aktif...", "Berdasarkan database...") atau kalimat kaku seperti formulir.
+2. TO THE POINT & RINGKAS: jawab langsung apa yang ditanya, 1-3 kalimat padat (atau poin ringkas kalau memang perlu daftar). Jangan nambahin metrik lain yang nggak ditanya.
+3. SAPAAN HANYA KALAU PESANNYA CUMA SAPAAN: kalau pengguna cuma bilang "hi" atau "halo", sapa balik dengan santai. Kalau dia langsung bertanya, langsung jawab tanpa pembuka.
+4. ANGKA, ID, DAN NAMA HARUS DARI SNAPSHOT DI BAWAH: jangan pernah mengarang angka, ID, atau nama. Kalau datanya nggak ada di snapshot, bilang terus terang datanya nggak ketemu.
+5. "SIAPA SAYA": jawab dari blok identitas admin di snapshot (nama + ID pengguna + role admin). ID scan BUKAN ID orang — jangan pernah pakai ID scan sebagai ID kamu atau ID siapa pun.
+6. "SAYA BISA APA AJA": jelasin dengan santai apa aja yang bisa ditanyain ke kamu soal website ini (pengguna, scan, produk, tren, log, settings).
+7. DATA SENSITIF: jangan sebar email pengguna lain kalau memang tidak ditanya soal pengguna itu. Password tidak pernah ada di konteks — jangan pernah menebak atau menyebutkannya.
 
-🎯 ATURAN EMAS GAYA RESPONS:
-1. TO THE POINT & RINGKAS: Jawab langsung ke inti pertanyaan secara padat, jelas, akurat, dan berbobot tanpa basa-basi pembuka atau kalimat penutup bertele-tele.
-2. TANPA SAPAAN PEMBUKA: Langsung jawab ke inti tanpa menyapa ("Halo", "Hai", dsb.).
-3. DILARANG MEMBERIKAN SARAN PERTANYAAN LANJUTAN: Hentikan jawaban begitu informasi inti yang ditanyakan selesai disampaikan.
+🔓 YANG BISA KAMU BANTU (ADMIN PUNYA AKSES KE SELURUH DATABASE):
+Kamu boleh menjawab soal SELURUH data website — bukan cuma data admin sendiri: jumlah dan daftar pengguna, pemindaian (total, selesai, gagal, terbaru, per pengguna), tren kondisi kulit semua pengguna, katalog produk, obrolan customer, log aktivitas, dan settings yang bukan rahasia. Admin juga boleh tanya apa aja soal website/data, bukan cuma soal skincare.
 
-KONTEKS DATABASE WEBSITE LENGKAP (REAL-TIME SNAPSHOT UNTUK ADMIN):
+KONTEKS DATABASE WEBSITE LENGKAP (SNAPSHOT UNTUK ADMIN):
 {admin_db_context}
 
 RIWAYAT PERCAKAPAN SEBELUMNYA:
@@ -811,7 +827,15 @@ class AIOrchestrator:
         """Assemble the exact prompt chat() used to build inline, so the
         streaming and non-streaming paths cannot drift apart."""
         if role == "admin":
-            admin_db_context = ContextBuilder.build_admin_database_context(db, message)
+            admin_row = db.query(User).filter(User.id == user_id).first()
+            admin_info = (
+                {"id": admin_row.id, "name": admin_row.name, "email": admin_row.email}
+                if admin_row
+                else None
+            )
+            admin_db_context = ContextBuilder.build_admin_database_context(
+                db, message, admin_user=admin_info
+            )
             system = ADMIN_SYSTEM_PROMPT.format(
                 admin_db_context=admin_db_context,
                 chat_history=history_str,
@@ -819,10 +843,11 @@ class AIOrchestrator:
             return (
                 f"{system}\n\n"
                 f"Instruksi Admin: \"{message}\"\n\n"
-                f"Catatan Penting Gaya Respon:\n"
-                f"- Jawab TO THE POINT, langsung ke inti teknis data/kodingan yang diminta secara padat dan akurat.\n"
-                f"- DILARANG menyapa di awal respon (tanpa 'Halo', 'Hai', dsb.).\n"
-                f"- DILARANG memberikan saran pertanyaan lanjutan di akhir pesan!"
+                f"Aturan gaya respons:\n"
+                f"- Jawab hanya yang ditanya, to-the-point, singkat, padat, dan NATURAL seperti ngobrol santai (1-3 kalimat, atau poin ringkas kalau memang perlu daftar).\n"
+                f"- Jangan menyapa di awal kecuali pesan admin cuma sapaan.\n"
+                f"- Angka, ID, dan nama harus dari snapshot database di atas — jangan mengarang. "
+                f"\"Siapa saya\" dijawab dari blok identitas admin di snapshot (nama + ID pengguna), bukan ID scan."
             )
         user_context = ContextBuilder.build_user_context(user_id, db, scan_id)
         need_products = self._needs_products(message, history_str)
@@ -1144,6 +1169,35 @@ class AIOrchestrator:
         # ADMIN LOCAL QUERIES (Zero restrictions: Coding, DB, Customer Chat Analysis, Disease Trends)
         # ─────────────────────────────────────────────────────
         if role == "admin":
+            # 0. Sapaan, identitas, dan kemampuan admin — jawaban natural
+            # (bukan laporan sistem), sama santainya seperti ke customer.
+            admin_u = db.query(User).filter(User.id == user_id).first() if user_id else None
+            admin_name = admin_u.name if admin_u and admin_u.name else "Admin"
+            cleaned_first = re.sub(r"[^\w\s]", "", msg_lower).strip().split()
+            greetings = [
+                "hi", "hii", "hiii", "halo", "hai", "helo", "hello", "hey", "hola",
+                "p", "pagi", "siang", "sore", "malam", "assalamualaikum", "assalam",
+            ]
+            if cleaned_first and cleaned_first[0] in greetings:
+                return (
+                    f"Halo {admin_name}! Ada yang bisa dibantu? Kamu bisa tanya soal pengguna, "
+                    "scan, produk, tren kulit pengguna, atau data website lainnya."
+                )
+            if any(w in msg_lower for w in ["siapa saya", "siapa aku", "siapa dia", "akun saya", "profil saya", "data saya", "email saya"]):
+                if admin_u:
+                    joined = admin_u.created_at.strftime("%d %B %Y") if admin_u.created_at else "-"
+                    return (
+                        f"Kamu {admin_u.name}, admin Laomera (ID pengguna #{admin_u.id}, "
+                        f"email {admin_u.email}). Akunmu terdaftar sejak {joined}."
+                    )
+                return "Kamu login sebagai admin Laomera."
+            if any(w in msg_lower for w in ["saya bisa apa", "bisa apa aja", "bisa apa saja", "apa saja yang bisa", "apa yang bisa", "kemampuan", "ngapain aja", "bisa bantu apa"]):
+                return (
+                    "Sebagai admin, kamu bisa tanya aku soal apa aja yang ada di database website ini — "
+                    "misalnya jumlah pengguna, siapa yang paling sering scan, scan terbaru, produk di katalog, "
+                    "tren masalah kulit pengguna, sampai log aktivitas. Kalau mau tanya soal perawatan kulit juga boleh."
+                )
+
             # 1. Customer Chat Trends (identifikasi chat, sering nanya apa, ngeluh apa, minta apa)
             if any(w in msg_lower for w in ["chat", "obrolan", "keluh", "nanya", "minta", "tren pertanyaan", "identifikasi chat", "pertanyaan customer", "pertanyaan user"]):
                 cust_chat_records = db.query(ChatMessage.content, User.name, ChatMessage.created_at).join(
@@ -1208,7 +1262,7 @@ class AIOrchestrator:
                 return "\n".join(res)
 
             # 2. Disease / Health Trends Query
-            if any(w in msg_lower for w in ["tren penyakit", "penyakit kulit", "kondisi kulit", "rerata skor", "rata-rata kulit", "masalah kulit terbanyak"]):
+            if any(w in msg_lower for w in ["tren penyakit", "penyakit kulit", "kondisi kulit", "masalah kulit", "tren kulit", "rerata skor", "rata-rata kulit", "masalah kulit terbanyak"]):
                 avg_m = db.query(
                     func.count(AnalysisResult.id).label("total"),
                     func.avg(AnalysisResult.overall_score).label("overall"),
@@ -1237,7 +1291,10 @@ class AIOrchestrator:
                 )
 
             # 3. Coding / Fixing Website / General Software Engineering (Zero Restrictions for Admin)
-            if any(w in msg_lower for w in ["koding", "coding", "perbaiki", "fix", "bug", "python", "javascript", "fastapi", "html", "css", "database", "controller", "fungsi", "error", "script", "ubah", "tambah", "arsitektur", "website"]):
+            # NOTE: kata umum seperti "website"/"database" sengaja TIDAK masuk
+            # daftar ini — kalau tidak, pertanyaan data ("aktivitas terakhir di
+            # website?") malah dijawab panduan koding.
+            if any(w in msg_lower for w in ["koding", "coding", "perbaiki", "fix", "bug", "python", "javascript", "fastapi", "html", "css", "controller", "fungsi", "error", "script", "ubah", "tambah", "arsitektur"]):
                 return (
                     "**Panduan Teknis Sistem SkinCheck (Akses Khusus Admin):**\n"
                     "Sebagai Admin, Anda memiliki kontrol penuh atas arsitektur dan kodingan sistem. Berikut ringkasan modul utama:\n"
@@ -1271,17 +1328,29 @@ class AIOrchestrator:
                     res.append(f"• #{u.id} {u.name} ({u.email}) — Role: {u.role}, Status: {u.status}")
                 return "\n".join(res)
 
-            # 5. Scans snapshot
+            # 5. Scans snapshot (total + 5 scan terbaru beserta pemiliknya)
             if any(w in msg_lower for w in ["scan", "pemindaian", "foto"]):
                 total_scans = db.query(SkinScan).count()
                 completed = db.query(SkinScan).filter(SkinScan.status == "completed").count()
                 failed = db.query(SkinScan).filter(SkinScan.status == "failed").count()
-                return (
-                    f"**Statistik Pemindaian Wajah (Skin Scans):**\n"
-                    f"• Total Scan: {total_scans} kali\n"
-                    f"• Berhasil Dianalisis: {completed}\n"
-                    f"• Gagal / Ditolak: {failed}"
+                recent_scans = (
+                    db.query(SkinScan, User.name)
+                    .join(User, SkinScan.user_id == User.id)
+                    .order_by(SkinScan.created_at.desc())
+                    .limit(5)
+                    .all()
                 )
+                res = [
+                    "**Statistik Pemindaian Wajah (Skin Scans):**",
+                    f"• Total Scan: {total_scans} kali",
+                    f"• Berhasil Dianalisis: {completed}",
+                    f"• Gagal / Ditolak: {failed}\n",
+                    "**5 Scan Terbaru:**",
+                ]
+                for s, owner_name in recent_scans:
+                    when = s.created_at.strftime("%d/%m %H:%M") if s.created_at else "-"
+                    res.append(f"• Scan #{s.id} — {owner_name} — {s.status} — {when}")
+                return "\n".join(res)
 
             # 6. Products snapshot
             if any(w in msg_lower for w in ["produk", "katalog", "shopee", "barang"]):
@@ -1329,19 +1398,17 @@ class AIOrchestrator:
                     f"• **Katalog Produk**: {active_products} produk aktif di katalog AI\n"
                     f"• **Analisis Berhasil (Success Rate)**: {success_rate} ({failed_scans} gagal)\n"
                     f"• **AI Sessions**: {total_ai_sessions} total sesi obrolan\n"
-                    f"Seluruh kartu metrik di Dashboard Admin beroperasi aktif dan sinkron real-time."
+                    f"Angka-angka di atas sama persis dengan yang tampil di kartu metrik dashboard admin."
                 )
 
-            # Default admin database summary
+            # Default admin database summary (natural, bukan laporan sistem)
             total_users = db.query(User).count()
             total_scans = db.query(SkinScan).count()
             total_prods = db.query(Product).count()
             return (
-                f"**Ringkasan Database Website SkinCheck:**\n"
-                f"• Total Pengguna: {total_users}\n"
-                f"• Total Pemindaian: {total_scans}\n"
-                f"• Total Produk Katalog: {total_prods}\n"
-                f"Seluruh tabel database (users, scans, analysis_results, products, activity_logs, system_settings, chat_messages) aktif dan dapat diakses."
+                f"Di database saat ini ada {total_users} pengguna, {total_scans} pemindaian, "
+                f"dan {total_prods} produk di katalog. Kalau mau detailnya, tanya aja — misalnya "
+                "berapa total pengguna, scan terbaru dari siapa, atau produk apa saja di katalog."
             )
 
         # ─────────────────────────────────────────────────────
