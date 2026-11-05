@@ -23,6 +23,90 @@ class AICopilotService:
     5. Synchronizes product database with RAG knowledge base.
     """
 
+    # Kata kunci target kulit (skin_concern produk, bilingual ID/EN) per
+    # kondisi VGG — dipakai halaman Tren Scan untuk mencocokkan produk
+    # katalog dengan kondisi yang menonjol. "semua" cocok ke semua kondisi.
+    CONDITION_CONCERN_KEYWORDS = {
+        "acne": ["jerawat", "acne", "komedo", "blackhead", "whitehead", "bekas jerawat"],
+        "dry": ["kering", "dry", "mengelupas", "dehidrasi"],
+        "oily": ["berminyak", "oily", "minyak", "sebum", "pori"],
+        "dark_spots": ["dark spot", "flek", "noda", "hiperpigmentasi", "kusam", "bekas jerawat"],
+        "wrinkles": ["wrinkle", "kerutan", "anti-aging", "garis halus", "penuaan"],
+    }
+
+    CONDITION_LABELS = {
+        "acne": "Jerawat",
+        "oily": "Kulit Berminyak",
+        "dry": "Kulit Kering",
+        "dark_spots": "Noda Hitam",
+        "wrinkles": "Kerutan",
+    }
+
+    @staticmethod
+    def product_matches_condition(product: Product, condition_key: str) -> bool:
+        """True bila produk relevan untuk kondisi tsb (dari skin_concern-nya)."""
+        concerns = [c.strip().lower() for c in product.get_skin_concern()]
+        if not concerns:
+            return False
+        if "semua" in concerns or "all" in concerns:
+            return True
+        keywords = AICopilotService.CONDITION_CONCERN_KEYWORDS.get(condition_key, [])
+        haystack = " | ".join(concerns)
+        return any(kw in haystack for kw in keywords)
+
+    @staticmethod
+    def get_platform_scan_trends(db: Session) -> Dict[str, Any]:
+        """Rata-rata TOTAL seluruh scan pengguna yang sudah dianalisis
+        (semua waktu, bukan jendela 30 hari seperti get_aggregate_skin_trends).
+        Dipakai halaman admin Tren Scan: grafik 5 output VGG + kondisi dominan.
+        Fallback dark spots -> hyperpigmentation dan wrinkles -> texture
+        dipakai supaya angkanya konsisten dengan rata-rata di dashboard user.
+        """
+        rows = (
+            db.query(AnalysisResult)
+            .join(SkinScan, AnalysisResult.skin_scan_id == SkinScan.id)
+            .filter(SkinScan.status == "completed", AnalysisResult.overall_score.isnot(None))
+            .order_by(AnalysisResult.id.desc())
+            .limit(5000)
+            .all()
+        )
+        total_scans = db.query(func.count(SkinScan.id)).scalar() or 0
+        keys = ["acne", "dry", "oily", "dark_spots", "wrinkles"]
+        sums = {k: 0.0 for k in keys}
+        significant = {k: 0 for k in keys}
+        overall_sum = 0.0
+        for r in rows:
+            matrix = r.get_condition_matrix()
+            # Fallback yang sama dengan rata-rata dashboard.
+            if not matrix["dark_spots"] and (r.hyperpigmentation_score or 0) > 0:
+                matrix["dark_spots"] = r.hyperpigmentation_score
+            if not matrix["wrinkles"] and (r.texture_score or 0) > 0:
+                matrix["wrinkles"] = r.texture_score
+            for k in keys:
+                val = float(matrix.get(k, 0.0) or 0.0)
+                sums[k] += val
+                if val >= 40.0:
+                    significant[k] += 1
+            overall_sum += float(r.overall_score or 0.0)
+        n = len(rows)
+        conditions = []
+        for k in keys:
+            avg = round(sums[k] / n, 1) if n else 0.0
+            conditions.append({
+                "key": k,
+                "label": AICopilotService.CONDITION_LABELS[k],
+                "avg_score": avg,
+                "pct_significant": round(significant[k] / n * 100, 1) if n else 0.0,
+            })
+        conditions.sort(key=lambda c: c["avg_score"], reverse=True)
+        return {
+            "total_scans": int(total_scans),
+            "analyzed_scans": n,
+            "avg_overall": round(overall_sum / n, 1) if n else 0.0,
+            "conditions": conditions,
+            "dominant": conditions[0] if conditions else None,
+        }
+
     @staticmethod
     def get_aggregate_skin_trends(db: Session, days: int = 30) -> Dict[str, Any]:
         """Calculates aggregate statistical trends across customer scans."""

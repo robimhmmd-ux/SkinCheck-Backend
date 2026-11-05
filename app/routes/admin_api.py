@@ -45,7 +45,7 @@ from app.config.database import get_db
 from app.models.activity_log import ActivityLog
 from app.models.analysis_result import AnalysisResult
 from app.models.chat_message import ChatMessage
-from app.models.product import Product
+from app.models.product import Product, PRODUCT_CATEGORY_VALUES, normalize_category
 from app.models.skin_scan import SkinScan
 from app.models.system_setting import SystemSetting
 from app.models.user import User
@@ -435,7 +435,7 @@ def _apply_product_fields(product: Product, data: dict) -> None:
     if data.get("name") is not None:
         product.name = data["name"].strip()
     if data.get("category") is not None:
-        product.category = data["category"].strip()
+        product.category = normalize_category(data["category"])
     if data.get("description") is not None:
         product.description = data["description"]
     if data.get("ingredients") is not None:
@@ -460,11 +460,17 @@ async def admin_create_product(
     status = body.status or "active"
     if status not in PRODUCT_STATUSES:
         return JSONResponse(status_code=400, content={"detail": "Status produk tidak valid."})
+    category = normalize_category(body.category)
+    if category not in PRODUCT_CATEGORY_VALUES:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Kategori tidak dikenal. Pilihan: {', '.join(PRODUCT_CATEGORY_VALUES)}."},
+        )
     try:
         product = Product(
             brand=body.brand.strip(),
             name=body.name.strip(),
-            category=body.category.strip(),
+            category=category,
             description=body.description,
             usage_guidance=body.usage_guidance,
             shopee_link=body.shopee_link or None,
@@ -491,6 +497,11 @@ async def admin_update_product(
     admin = _require_admin(request)
     if body.status is not None and body.status not in PRODUCT_STATUSES:
         return JSONResponse(status_code=400, content={"detail": "Status produk tidak valid."})
+    if body.category is not None and normalize_category(body.category) not in PRODUCT_CATEGORY_VALUES:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Kategori tidak dikenal. Pilihan: {', '.join(PRODUCT_CATEGORY_VALUES)}."},
+        )
     try:
         product = db.query(Product).filter(Product.id == product_id).first()
         if not product:
@@ -537,7 +548,7 @@ async def admin_auto_insert_product(
         product = Product(
             brand=(body.brand or "SkinCheck Lab Formulations").strip(),
             name=body.name.strip(),
-            category=(body.category or "treatment").strip().lower(),
+            category=normalize_category(body.category) or "serum",
             description=body.description,
             usage_guidance=body.usage_guidance,
             shopee_link=body.shopee_link or None,
@@ -652,6 +663,50 @@ def _copilot_gaps(db: Session, trends: list) -> list:
             }
         )
     return gaps
+
+
+@router.get("/trends")
+async def admin_scan_trends(request: Request, db: Session = Depends(get_db)):
+    """Tren hasil scan SELURUH pengguna (admin only).
+
+    Grafik di halaman Tren Scan: rata-rata total 5 output VGG dari semua
+    scan yang sudah dianalisis + kondisi yang paling menonjol, plus
+    rekomendasi produk katalog yang cocok per kondisi. Rekomendasi hanya
+    berisi nama produk dan kandungannya (tanpa deskripsi/link/harga).
+    """
+    _require_admin(request)
+    try:
+        from app.services.ai_copilot_service import AICopilotService
+
+        trends = AICopilotService.get_platform_scan_trends(db)
+        products = db.query(Product).filter(Product.status == "active").all()
+        recommendations = []
+        for cond in trends["conditions"]:
+            matched = [
+                p
+                for p in products
+                if AICopilotService.product_matches_condition(p, cond["key"])
+            ]
+            recommendations.append(
+                {
+                    "condition_key": cond["key"],
+                    "condition_label": cond["label"],
+                    "avg_score": cond["avg_score"],
+                    "products": [
+                        {
+                            "id": p.id,
+                            "brand": p.brand,
+                            "name": p.name,
+                            "ingredients": p.get_ingredients(),
+                        }
+                        for p in matched
+                    ],
+                }
+            )
+        return JSONResponse(content={**trends, "recommendations": recommendations})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("admin trends failed: %s", e)
+        return _db_unavailable()
 
 
 @router.get("/ai-copilot")

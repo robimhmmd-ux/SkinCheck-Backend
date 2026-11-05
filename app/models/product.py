@@ -56,6 +56,49 @@ class Product(Base):
 
 
 # ==========================================
+# Kategori jenis produk (canonical)
+# ==========================================
+# Satu-satunya daftar kategori yang dipakai marketplace (user) dan form
+# produk (admin). Nilai disimpan lowercase; label tampil di UI. Kategori
+# lama ("cleanser") dinormalisasi ke yang canonical ("face wash") saat
+# dibaca/ditulis, jadi produk lama tetap masuk filter yang benar.
+PRODUCT_CATEGORIES = [
+    ("face wash", "Face Wash"),
+    ("toner", "Toner"),
+    ("serum", "Serum"),
+    ("moisturizer", "Moisturizer"),
+    ("sunscreen", "Sunscreen"),
+    ("mask", "Masker"),
+    ("exfoliator", "Eksfoliator"),
+]
+PRODUCT_CATEGORY_VALUES = [value for value, _ in PRODUCT_CATEGORIES]
+PRODUCT_CATEGORY_LABELS = dict(PRODUCT_CATEGORIES)
+
+LEGACY_CATEGORY_MAP = {
+    "cleanser": "face wash",
+    "facewash": "face wash",
+    "face-wash": "face wash",
+    "pembersih": "face wash",
+    "sunblock": "sunscreen",
+    "sun screen": "sunscreen",
+    "pelembap": "moisturizer",
+}
+
+
+def normalize_category(value) -> str:
+    """Kembalikan nilai kategori canonical (lowercase), atau '' bila kosong."""
+    if not value:
+        return ""
+    key = str(value).strip().lower()
+    return LEGACY_CATEGORY_MAP.get(key, key)
+
+
+def category_label(value) -> str:
+    """Label tampil untuk sebuah nilai kategori (legacy ikut dinormalisasi)."""
+    return PRODUCT_CATEGORY_LABELS.get(normalize_category(value), (value or "Skincare"))
+
+
+# ==========================================
 # Pydantic Schemas (for validation)
 # ==========================================
 class ProductSchema(BaseModel):
