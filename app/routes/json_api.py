@@ -32,6 +32,7 @@ Database failure handling:
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -98,6 +99,21 @@ def _db_unavailable() -> JSONResponse:
     )
 
 
+def _iso_utc(dt: Optional[datetime]) -> Optional[str]:
+    """Emit a timestamp as a UTC-aware ISO string.
+
+    All models store naive datetimes from datetime.utcnow, i.e. UTC
+    wall-clock without an offset. Emitting them bare made browsers parse
+    them as LOCAL time, so WIB users saw history times 7 hours behind
+    reality. Attaching +00:00 makes clients convert correctly.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 def _analysis_dict(a: Optional[AnalysisResult]) -> Optional[dict]:
     if not a:
         return None
@@ -114,7 +130,7 @@ def _analysis_dict(a: Optional[AnalysisResult]) -> Optional[dict]:
         "hyperpigmentation_score": a.hyperpigmentation_score,
         "overall_score": a.overall_score,
         "ai_response": a.ai_response,
-        "created_at": a.created_at.isoformat() if a.created_at else None,
+        "created_at": _iso_utc(a.created_at),
     }
 
 
@@ -125,7 +141,7 @@ def _scan_dict(scan: SkinScan, analysis: Optional[AnalysisResult] = None) -> dic
         "image_path": scan.image_path,
         "status": scan.status,
         "image_quality_score": scan.image_quality_score,
-        "created_at": scan.created_at.isoformat() if scan.created_at else None,
+        "created_at": _iso_utc(scan.created_at),
         "analysis": _analysis_dict(analysis),
     }
 
@@ -945,7 +961,7 @@ async def assistant_history(
                 "role": m.role,
                 "content": m.content,
                 "time": m.created_at.strftime("%H:%M") if m.created_at else "",
-                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "created_at": _iso_utc(m.created_at),
             }
             for m in messages
         ]
