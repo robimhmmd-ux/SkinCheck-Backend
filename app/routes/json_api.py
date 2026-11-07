@@ -82,6 +82,27 @@ def _require_session(request: Request) -> dict:
     return user
 
 
+def _require_verified_customer(request: Request, db: Session, allow_guest: bool = False) -> dict:
+    """Customer yang statusnya active (verifikasi OTP + biodata selesai).
+
+    Guest (tanpa sesi) tetap lolos seperti sekarang kalau allow_guest —
+    jalur demo Tester id=1 di endpoint upload. Customer yang login tapi
+    belum verifikasi (pending / awaiting_biodata) ditolak 403, supaya
+    kunci fitur di frontend ditegakkan juga server-side.
+    """
+    user = _session_user(request)
+    if not user:
+        if allow_guest:
+            return {"id": 1, "name": "Tester", "role": "customer", "is_guest": True}
+        raise _unauthorized()
+    if user.get("role") != "customer":
+        raise _forbidden("Fitur ini untuk customer.")
+    row = db.query(User).filter(User.id == user["id"]).first()
+    if not row or row.status != "active":
+        raise _forbidden("Selesaikan verifikasi akun dulu (OTP WhatsApp dan biodata) untuk memakai fitur ini.")
+    return user
+
+
 def _unauthorized():
     from fastapi import HTTPException
 
@@ -332,21 +353,20 @@ async def login(request: Request, payload: LoginIn, db: Session = Depends(get_db
         return JSONResponse(
             status_code=401, content={"detail": "Email atau password salah."}
         )
-    if user.status == "pending":
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "Akun belum terverifikasi. Verifikasi kode OTP WhatsApp dulu di halaman verifikasi, lalu coba masuk lagi."},
-        )
-    if user.status != "active":
+    if user.status not in ("active", "pending", "awaiting_biodata"):
         return JSONResponse(
             status_code=401, content={"detail": "Akun dinonaktifkan."}
         )
+    # pending / awaiting_biodata BOLEH masuk: mereka mendarat di dashboard
+    # dengan modal verifikasi (OTP dulu, lalu biodata) dan fitur terkunci
+    # sampai statusnya active. Status ikut disimpan di sesi supaya /me tahu.
 
     request.session["user"] = {
         "id": user.id,
         "name": user.name,
         "email": user.email,
         "role": user.role,
+        "status": user.status,
     }
     _log_activity(
         db, request, user.id,
@@ -432,6 +452,8 @@ async def register(request: Request, payload: RegisterIn, db: Session = Depends(
         db.add(user)
         db.commit()
         db.refresh(user)
+        # Jejak untuk notifikasi admin: akun baru daftar tapi belum verifikasi.
+        _log_activity(db, request, user.id, "Mendaftar akun baru (belum verifikasi)")
     except Exception as e:  # noqa: BLE001
         logger.warning("register failed: %s", e)
         db.rollback()
@@ -497,13 +519,14 @@ async def otp_request(payload: OtpRequestIn, db: Session = Depends(get_db)):
 
 
 @router.post("/auth/otp/verify")
-async def otp_verify(payload: OtpVerifyIn, db: Session = Depends(get_db)):
+async def otp_verify(request: Request, payload: OtpVerifyIn, db: Session = Depends(get_db)):
     """Verifikasi kode OTP WhatsApp (6 digit, 10 menit, sekali pakai).
 
-    Kalau kode benar, akun pending dengan nomor WA yang sama diaktifkan
-    (pending -> active) sehingga baru bisa login. Verifikasi mandiri
-    tanpa akun (mis. nomor belum didaftarkan) tetap mengembalikan
-    verified=True tanpa mengaktifkan apa-apa.
+    Kalau kode benar, akun pending dengan nomor WA yang sama maju ke tahap
+    biodata (pending -> awaiting_biodata) — BUKAN langsung active. Fitur
+    penuh baru terbuka sesudah biodata dilengkapi (lihat
+    POST /profile/biodata). Verifikasi mandiri tanpa akun (mis. nomor belum
+    didaftarkan) tetap mengembalikan verified=True tanpa mengubah apa-apa.
     """
     from app.services.fonnte_otp import (
         InvalidPhoneError,
@@ -528,6 +551,7 @@ async def otp_verify(payload: OtpVerifyIn, db: Session = Depends(get_db)):
             content={"detail": "Kode OTP salah, sudah dipakai, atau sudah kedaluwarsa. Minta kode baru."},
         )
     activated = False
+    activated_ids = []
     try:
         for candidate in db.query(User).filter(User.status == "pending").all():
             try:
@@ -535,10 +559,22 @@ async def otp_verify(payload: OtpVerifyIn, db: Session = Depends(get_db)):
             except Exception:  # noqa: BLE001
                 data = {}
             if data.get("phone") == phone62:
-                candidate.status = "active"
+                # OTP lolos -> akun maju ke tahap biodata (BUKAN langsung
+                # active). Fitur penuh baru terbuka sesudah biodata lengkap.
+                candidate.status = "awaiting_biodata"
+                activated_ids.append(candidate.id)
                 activated = True
         if activated:
             db.commit()
+            for uid in activated_ids:
+                _log_activity(db, request, uid, "Verifikasi OTP WhatsApp berhasil")
+            # Kalau pemverifikasi sedang login sebagai salah satu akun itu
+            # (alur modal verifikasi di dashboard), segarkan status sesinya
+            # supaya /me langsung tahu tahap berikutnya.
+            sess = request.session.get("user")
+            if isinstance(sess, dict) and sess.get("id") in activated_ids:
+                sess["status"] = "awaiting_biodata"
+                request.session["user"] = sess
     except Exception as e:  # noqa: BLE001
         logger.warning("otp activation failed: %s", e)
         db.rollback()
@@ -598,6 +634,67 @@ async def update_my_profile(
         request.session["user"] = sess
     _log_activity(db, request, db_user.id, "Customer memperbarui profilnya")
     return JSONResponse(content={"user": _user_dict(db_user)})
+
+
+class BiodataIn(BaseModel):
+    name: str
+    age: int
+    gender: str
+
+
+@router.post("/profile/biodata")
+async def complete_biodata(request: Request, body: BiodataIn, db: Session = Depends(get_db)):
+    """Lengkapi biodata akun (tahap verifikasi sesudah OTP).
+
+    Hanya untuk akun berstatus awaiting_biodata (OTP sudah lolos) atau
+    active (memperbarui biodata). Akun pending (OTP belum lolos) ditolak.
+    Kalau biodata lengkap dan statusnya awaiting_biodata, status berubah
+    menjadi active dan seluruh fitur customer terbuka.
+    """
+    user = _require_session(request)
+    name = (body.name or "").strip()
+    gender = (body.gender or "").strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"detail": "Nama wajib diisi."})
+    if gender not in ("Laki-laki", "Perempuan"):
+        return JSONResponse(status_code=400, content={"detail": "Jenis kelamin harus 'Laki-laki' atau 'Perempuan'."})
+    if not isinstance(body.age, int) or isinstance(body.age, bool) or not 5 <= body.age <= 120:
+        return JSONResponse(status_code=400, content={"detail": "Umur harus di antara 5 dan 120 tahun."})
+    try:
+        db_user = db.query(User).filter(User.id == user["id"]).first()
+        if not db_user:
+            return JSONResponse(status_code=404, content={"detail": "Akun tidak ditemukan."})
+        if db_user.status == "pending":
+            return JSONResponse(status_code=400, content={"detail": "Verifikasi kode OTP WhatsApp dulu sebelum melengkapi biodata."})
+        if db_user.status not in ("awaiting_biodata", "active"):
+            return JSONResponse(status_code=400, content={"detail": "Akun dinonaktifkan."})
+        try:
+            profile_data = json.loads(db_user.profile_data or "{}")
+        except Exception:  # noqa: BLE001
+            profile_data = {}
+        profile_data["age"] = body.age
+        profile_data["gender"] = gender
+        db_user.name = name
+        db_user.profile_data = json.dumps(profile_data)
+        completed = False
+        if db_user.status == "awaiting_biodata":
+            db_user.status = "active"
+            completed = True
+        db.commit()
+        db.refresh(db_user)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("biodata update failed: %s", e)
+        db.rollback()
+        return _db_unavailable()
+    # Segarkan sesi supaya getMe langsung menampilkan nama + status baru.
+    sess = request.session.get("user")
+    if isinstance(sess, dict):
+        sess["name"] = db_user.name
+        sess["status"] = db_user.status
+        request.session["user"] = sess
+    if completed:
+        _log_activity(db, request, db_user.id, "Melengkapi biodata — verifikasi akun selesai")
+    return JSONResponse(content={"user": _user_dict(db_user), "verification_complete": completed})
 
 
 # ---------------------------------------------------------------------------
@@ -702,12 +799,7 @@ async def scan_upload(
     model are available. If AI inference fails or is not available, status
     is updated to 'failed' and analysis remains null without crashing the server.
     """
-    user = _session_user(request)
-    if not user:
-        # Fallback to demo/tester user (id=1) for guest testing on mobile devices
-        user = {"id": 1, "name": "Tester", "role": "customer", "is_guest": True}
-    elif user.get("role") != "customer":
-        raise _forbidden("Upload scan ini untuk customer.")
+    user = _require_verified_customer(request, db, allow_guest=True)
     # Admin-controlled gates (maintenance mode / daily quota).
     gate_error = _scan_gates(request, db, user)
     if gate_error is not None:
@@ -825,12 +917,7 @@ async def scan_multi_upload(
     best frames per pose, executes batch VGG16 skin condition inference,
     and stores 1 SkinScan + 1 AnalysisResult row.
     """
-    user = _session_user(request)
-    if not user:
-        # Fallback to demo/tester user (id=1) for guest testing on mobile devices
-        user = {"id": 1, "name": "Tester", "role": "customer", "is_guest": True}
-    elif user.get("role") != "customer":
-        raise _forbidden("Upload scan ini untuk customer.")
+    user = _require_verified_customer(request, db, allow_guest=True)
     # Admin-controlled gates (maintenance mode / daily quota).
     gate_error = _scan_gates(request, db, user)
     if gate_error is not None:
@@ -986,7 +1073,7 @@ async def assistant_chat(
     request: Request, payload: AssistantChatIn, db: Session = Depends(get_db)
 ):
     """API endpoint for AI skincare assistant chat."""
-    user = _require_session(request)
+    user = _require_verified_customer(request, db)
     message = payload.message.strip()
     if not message:
         return JSONResponse(status_code=400, content={"detail": "Pesan tidak boleh kosong."})
@@ -1020,7 +1107,7 @@ def assistant_chat_stream(request: Request, payload: AssistantChatIn, db: Sessio
     closed only after the stream finishes, which is also when history is
     saved (inside chat_stream).
     """
-    user = _require_session(request)
+    user = _require_verified_customer(request, db)
     message = payload.message.strip()
     if not message:
         return JSONResponse(status_code=400, content={"detail": "Pesan tidak boleh kosong."})

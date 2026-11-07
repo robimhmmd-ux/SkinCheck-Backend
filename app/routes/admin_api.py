@@ -230,6 +230,61 @@ async def admin_dashboard(request: Request, db: Session = Depends(get_db)):
             .distinct()
             .count()
         )
+        # Verifikasi akun: siapa yang baru daftar tapi belum verifikasi
+        # (pending = OTP belum lolos; awaiting_biodata = OTP lolos, biodata
+        # belum lengkap), dan siapa yang baru saja menyelesaikan verifikasi
+        # (jejaknya ada di activity log).
+        pending_count = db.query(User).filter(User.status == "pending").count()
+        awaiting_count = (
+            db.query(User).filter(User.status == "awaiting_biodata").count()
+        )
+        pending_accounts = []
+        for u in (
+            db.query(User)
+            .filter(User.status.in_(["pending", "awaiting_biodata"]))
+            .order_by(User.created_at.desc())
+            .limit(10)
+            .all()
+        ):
+            try:
+                pdata = json.loads(u.profile_data or "{}")
+            except Exception:  # noqa: BLE001
+                pdata = {}
+            pending_accounts.append(
+                {
+                    "id": u.id,
+                    "name": u.name,
+                    "email": u.email,
+                    "phone": pdata.get("phone") or "",
+                    "status": u.status,
+                    "created_at": _iso_utc(u.created_at),
+                }
+            )
+        recently_verified = []
+        for log in (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.activity.in_(
+                    [
+                        "Verifikasi OTP WhatsApp berhasil",
+                        "Melengkapi biodata — verifikasi akun selesai",
+                    ]
+                )
+            )
+            .order_by(ActivityLog.created_at.desc())
+            .limit(10)
+            .all()
+        ):
+            owner = db.query(User).filter(User.id == log.user_id).first()
+            recently_verified.append(
+                {
+                    "user_id": log.user_id,
+                    "name": owner.name if owner else "-",
+                    "email": owner.email if owner else "-",
+                    "activity": log.activity,
+                    "created_at": _iso_utc(log.created_at),
+                }
+            )
         t0 = time.time()
         db.execute(text("SELECT 1"))
         db_latency_ms = round((time.time() - t0) * 1000, 1)
@@ -249,6 +304,12 @@ async def admin_dashboard(request: Request, db: Session = Depends(get_db)):
             "active_products": active_products,
             "chat_messages_30d": chat_messages_30d,
             "chat_users_30d": chat_users_30d,
+            "verification": {
+                "pending_count": pending_count,
+                "awaiting_biodata_count": awaiting_count,
+                "pending_accounts": pending_accounts,
+                "recently_verified": recently_verified,
+            },
             "health": {
                 "db": "ok",
                 "db_latency_ms": db_latency_ms,
@@ -262,7 +323,7 @@ async def admin_dashboard(request: Request, db: Session = Depends(get_db)):
 # Users CRUD (akun baru selalu customer; soft deactivate, tanpa hard delete)
 # ---------------------------------------------------------------------------
 
-USER_STATUSES = {"active", "inactive", "suspended"}
+USER_STATUSES = {"active", "inactive", "suspended", "pending", "awaiting_biodata"}
 
 
 @router.get("/users")

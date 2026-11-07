@@ -17,7 +17,7 @@ class User(Base):
     email = Column(String(150), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     role = Column(String(50), default="customer") # customer or admin
-    status = Column(String(50), default="active") # active, inactive, suspended
+    status = Column(String(50), default="active") # active, inactive, suspended, pending (OTP belum lolos), awaiting_biodata (OTP lolos, biodata belum lengkap)
     profile_data = Column(Text, nullable=True)    # JSON string for skin goals, concerns
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
