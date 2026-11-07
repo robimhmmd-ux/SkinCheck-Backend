@@ -720,6 +720,24 @@ RIWAYAT PERCAKAPAN SEBELUMNYA:
 # 5. AI ORCHESTRATOR
 # ─────────────────────────────────────────────────────────
 
+def _setting_float(db: Session, key: str, default: float) -> float:
+    """Baca angka desimal dari system_settings. Nilai yang rusak (kosong,
+    bukan angka) diabaikan dan diganti default, supaya chat tidak pernah
+    mati gara-gara setelan yang salah ketik di halaman konfigurasi."""
+    try:
+        return float(SystemSetting.get_value(db, key, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _setting_int(db: Session, key: str, default: int) -> int:
+    """Seperti _setting_float, untuk bilangan bulat."""
+    try:
+        return int(SystemSetting.get_value(db, key, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 class AIOrchestrator:
     """
     Orchestrates the entire AI Chatbot flow:
@@ -745,8 +763,10 @@ class AIOrchestrator:
 
     def _get_active_model(self, db: Session):
         """Dynamically loads Gemini model using database settings or fallback to .env."""
-        api_key = SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY)
-        model_name = SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite")
+        # Di-strip: kunci/model yang ditempel dengan spasi di halaman
+        # konfigurasi harus tetap bisa dipakai, bukan ditolak Google.
+        api_key = (SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY) or "").strip()
+        model_name = (SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
 
         if not api_key:
             logger.warning("GEMINI_API_KEY is not configured.")
@@ -926,15 +946,15 @@ class AIOrchestrator:
             return
 
         try:
-            temp_val = float(SystemSetting.get_value(db, "AI_TEMPERATURE", "0.7"))
+            temp_val = _setting_float(db, "AI_TEMPERATURE", 0.7)
             # Cap output: the style rules demand 1-3 sentences; 4096 tokens only
             # lengthens the worst case. 1024 is still generous.
-            max_tokens_val = min(int(SystemSetting.get_value(db, "AI_MAX_TOKENS", "4096")), 1024)
-            current_model_name = SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite")
+            max_tokens_val = min(_setting_int(db, "AI_MAX_TOKENS", 4096), 1024)
+            current_model_name = (SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
             prompt_input = self._build_prompt(db, user_id, message, scan_id, role, history_str, rag_docs)
 
             candidates = list(dict.fromkeys([current_model_name, "gemini-3.5-flash-lite"]))[:2]
-            api_key = self.cached_key or SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY)
+            api_key = (self.cached_key or SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY) or "").strip()
             full = ""
             started = False
             deadline = time.monotonic() + 75
@@ -1058,9 +1078,9 @@ class AIOrchestrator:
             # 5. Read dynamic generation parameters (output capped: the style
             # rules demand 1-3 sentences, so 4096 tokens only lengthens the
             # worst case; 1024 is still generous).
-            temp_val = float(SystemSetting.get_value(db, "AI_TEMPERATURE", "0.7"))
-            max_tokens_val = min(int(SystemSetting.get_value(db, "AI_MAX_TOKENS", "4096")), 1024)
-            current_model_name = SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite")
+            temp_val = _setting_float(db, "AI_TEMPERATURE", 0.7)
+            max_tokens_val = min(_setting_int(db, "AI_MAX_TOKENS", 4096), 1024)
+            current_model_name = (SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
 
             # 6. Build prompt (shared with the streaming path; product catalog
             # only attached when the user is actually asking about products).
@@ -1076,7 +1096,7 @@ class AIOrchestrator:
                 candidate_models = candidate_models[:1]
             ai_text = None
 
-            api_key = self.cached_key or SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY)
+            api_key = (self.cached_key or SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY) or "").strip()
             for m_name in candidate_models:
                 try:
                     # 1. Try SDK if available and not set to pure httpx

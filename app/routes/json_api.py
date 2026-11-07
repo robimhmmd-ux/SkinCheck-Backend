@@ -399,6 +399,24 @@ async def register(request: Request, payload: RegisterIn, db: Session = Depends(
             return JSONResponse(
                 status_code=409, content={"detail": "Email sudah terdaftar."}
             )
+        # Aturan nomor WA ganda (dikendalikan admin di Pengaturan, kunci
+        # ALLOW_SAME_PHONE_NUMBER; default "off" = satu nomor hanya untuk
+        # satu akun). Kalau admin mengaktifkannya ("on"), nomor yang sama
+        # boleh dipakai beberapa akun — untuk demo presentasi.
+        allow_same_phone = (
+            SystemSetting.get_value(db, "ALLOW_SAME_PHONE_NUMBER", "off") or "off"
+        ).strip().lower() == "on"
+        if not allow_same_phone:
+            for other in db.query(User).all():
+                try:
+                    other_data = json.loads(other.profile_data or "{}")
+                except Exception:  # noqa: BLE001
+                    other_data = {}
+                if other_data.get("phone") == phone62:
+                    return JSONResponse(
+                        status_code=409,
+                        content={"detail": "Nomor WhatsApp sudah digunakan akun lain."},
+                    )
         profile_data = {}
         if payload.skin_concerns:
             profile_data["skin_concerns"] = payload.skin_concerns

@@ -727,8 +727,8 @@ async def admin_ai_copilot(request: Request, db: Session = Depends(get_db)):
     ai_available = False
     ai_note = ""
     try:
-        api_key = SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY)
-        model_name = SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite")
+        api_key = (SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY) or "").strip()
+        model_name = (SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
         if not api_key:
             ai_note = "GEMINI_API_KEY belum disetel, sehingga usulan AI tidak tersedia. Tren dan gap analysis di bawah tetap dihitung dari data scan nyata."
         else:
@@ -832,6 +832,7 @@ SETTING_DEFS = [
     ("AI_SIMULATION_MODE", "off", False),
     ("SCAN_DAILY_QUOTA", "", False),  # kosong = tanpa batas (default aman)
     ("OTP_MODE", "", False),
+    ("ALLOW_SAME_PHONE_NUMBER", "off", False),  # off = satu nomor WA hanya untuk satu akun (aturan register)
     ("MAINTENANCE_MODE", "off", False),
     ("VGG_THRESHOLD", "40", False),
     ("YOLO_THRESHOLD", "0.25", False),
@@ -850,6 +851,7 @@ SETTINGS_ALLOWLIST = {key for key, _, _ in SETTING_DEFS}
 # - AI_MODEL / AI_MAX_TOKENS / AI_TEMPERATURE / AI_SIMULATION_MODE dibaca
 #   ai_assistant_service setiap chat.
 # - SCAN_DAILY_QUOTA & MAINTENANCE_MODE dibaca endpoint upload scan.
+# - ALLOW_SAME_PHONE_NUMBER dibaca endpoint register (aturan nomor WA ganda).
 # - OTP_MODE, VGG_THRESHOLD, YOLO_THRESHOLD saat ini hanya tersimpan
 #   (alur OTP masih WA-only; threshold belum dipakai inferensi) — jangan
 #   mengklaim sebaliknya di frontend.
@@ -930,19 +932,54 @@ async def admin_patch_settings(
             content={"detail": "Kunci di luar allowlist ditolak.", "rejected": rejected},
         )
     secret_keys = {k for k, _, s in SETTING_DEFS if s}
+    # Validasi dulu semuanya (sebelum ada yang ditulis), supaya satu nilai
+    # yang tidak valid tidak menyisakan setengah pengaturan sudah berubah.
+    # Secret di-strip (kunci yang ditempel dengan spasi/newline di ujung
+    # akan ditolak Google) — kosong tetap berarti "tidak diubah".
+    normalized = {}
+    for key, value in incoming.items():
+        raw = "" if value is None else str(value)
+        if key in secret_keys:
+            if raw == "":
+                continue
+            normalized[key] = raw.strip()
+            continue
+        text = raw.strip()
+        if key == "AI_MODEL":
+            if not text:
+                return JSONResponse(status_code=400, content={"detail": "AI_MODEL tidak boleh kosong."})
+            normalized[key] = text
+        elif key == "AI_TEMPERATURE":
+            try:
+                temp = float(text)
+            except ValueError:
+                return JSONResponse(status_code=400, content={"detail": "AI_TEMPERATURE harus berupa angka."})
+            if not 0 <= temp <= 2:
+                return JSONResponse(status_code=400, content={"detail": "AI_TEMPERATURE harus di antara 0 dan 2."})
+            normalized[key] = text
+        elif key == "AI_MAX_TOKENS":
+            try:
+                tokens = int(text)
+            except ValueError:
+                return JSONResponse(status_code=400, content={"detail": "AI_MAX_TOKENS harus berupa bilangan bulat."})
+            if tokens <= 0:
+                return JSONResponse(status_code=400, content={"detail": "AI_MAX_TOKENS harus lebih besar dari 0."})
+            normalized[key] = text
+        elif key == "ALLOW_SAME_PHONE_NUMBER":
+            low = text.lower()
+            if low in ("on", "true", "1", "ya"):
+                normalized[key] = "on"
+            elif low in ("off", "false", "0", "tidak"):
+                normalized[key] = "off"
+            else:
+                return JSONResponse(status_code=400, content={"detail": "ALLOW_SAME_PHONE_NUMBER harus 'on' atau 'off'."})
+        else:
+            normalized[key] = text
     try:
         changed = []
-        for key, value in incoming.items():
-            if key in secret_keys:
-                # Nilai kosong = tidak diubah (jangan menimpa secret lama
-                # dengan string kosong).
-                if value is None or str(value) == "":
-                    continue
-                SystemSetting.set_value(db, key, str(value))
-                changed.append(key)
-            else:
-                SystemSetting.set_value(db, key, "" if value is None else str(value))
-                changed.append(key)
+        for key, value in normalized.items():
+            SystemSetting.set_value(db, key, value)
+            changed.append(key)
     except Exception as e:  # noqa: BLE001
         logger.warning("admin settings update failed: %s", e)
         db.rollback()
@@ -991,8 +1028,8 @@ async def admin_test_db(request: Request, db: Session = Depends(get_db)):
 async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
     admin = _require_admin(request)
     t0 = time.time()
-    api_key = SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY)
-    model_name = SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite")
+    api_key = (SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY) or "").strip()
+    model_name = (SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
     if not api_key:
         return JSONResponse(
             content={
