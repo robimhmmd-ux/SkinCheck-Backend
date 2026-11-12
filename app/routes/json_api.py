@@ -99,7 +99,32 @@ def _require_verified_customer(request: Request, db: Session, allow_guest: bool 
         raise _forbidden("Fitur ini untuk customer.")
     row = db.query(User).filter(User.id == user["id"]).first()
     if not row or row.status != "active":
-        raise _forbidden("Selesaikan verifikasi akun dulu (OTP WhatsApp dan biodata) untuk memakai fitur ini.")
+        raise _forbidden("Akun tidak diizinkan. Lakukan verifikasi kode OTP dulu, baru bisa memakai fitur ini.")
+    return user
+
+
+def _require_chat_user(request: Request, db: Session) -> dict:
+    """Gate khusus chatbot: admin BOLEH chat (tanpa OTP), customer WAJIB active.
+
+    Sebelumnya chat memakai _require_verified_customer, yang menolak admin
+    (403 "Fitur ini untuk customer.") — regresi dari alur verifikasi
+    2026-11-07: chatbot admin yang sudah jalan sejak 2026-11-05 jadi tidak
+    bisa dipakai lewat widget. Admin tidak butuh verifikasi OTP; chatbot
+    admin membaca data website (ADMIN_SYSTEM_PROMPT), bukan data pribadi.
+    Customer yang belum verifikasi tetap ditolak 403 dengan pesan yang
+    jelas, supaya widget menampilkan ajakan verifikasi OTP, bukan
+    "Koneksi terputus".
+    """
+    user = _session_user(request)
+    if not user:
+        raise _unauthorized()
+    if user.get("role") == "admin":
+        return user
+    if user.get("role") != "customer":
+        raise _forbidden("Fitur ini untuk customer.")
+    row = db.query(User).filter(User.id == user["id"]).first()
+    if not row or row.status != "active":
+        raise _forbidden("Akun tidak diizinkan. Lakukan verifikasi kode OTP dulu, baru bisa memakai fitur ini.")
     return user
 
 
@@ -1073,7 +1098,7 @@ async def assistant_chat(
     request: Request, payload: AssistantChatIn, db: Session = Depends(get_db)
 ):
     """API endpoint for AI skincare assistant chat."""
-    user = _require_verified_customer(request, db)
+    user = _require_chat_user(request, db)
     message = payload.message.strip()
     if not message:
         return JSONResponse(status_code=400, content={"detail": "Pesan tidak boleh kosong."})
@@ -1107,7 +1132,7 @@ def assistant_chat_stream(request: Request, payload: AssistantChatIn, db: Sessio
     closed only after the stream finishes, which is also when history is
     saved (inside chat_stream).
     """
-    user = _require_verified_customer(request, db)
+    user = _require_chat_user(request, db)
     message = payload.message.strip()
     if not message:
         return JSONResponse(status_code=400, content={"detail": "Pesan tidak boleh kosong."})
