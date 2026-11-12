@@ -343,7 +343,14 @@ async def admin_users(
             like = f"%{q}%"
             query = query.filter((User.name.ilike(like)) | (User.email.ilike(like)))
         if status:
-            query = query.filter(User.status == status)
+            if status == "inactive":
+                # Inactive = akun yang belum verifikasi (pending /
+                # awaiting_biodata) + akun yang memang dinonaktifkan.
+                query = query.filter(
+                    User.status.in_(["inactive", "pending", "awaiting_biodata"])
+                )
+            else:
+                query = query.filter(User.status == status)
         total = query.count()
         rows = (
             query.order_by(User.id.desc())
