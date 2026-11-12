@@ -893,10 +893,22 @@ SETTING_DEFS = [
     ("AI_SIMULATION_MODE", "off", False),
     ("SCAN_DAILY_QUOTA", "", False),  # kosong = tanpa batas (default aman)
     ("OTP_MODE", "", False),
+    # REGISTRATION_OTP_MODE (2026-11-12): KUNCI INI WAJIB ADA — frontend tab
+    # OTP mengirimnya bareng OTP_MODE, dan auth_controller membacanya
+    # (default "dual") untuk alur OTP registrasi. Sebelumnya kunci ini
+    # tidak ada di allowlist sehingga PATCH /admin/settings DITOLAK
+    # (400 "Kunci di luar allowlist ditolak") dan SELURUH simpan tab OTP
+    # gagal — termasuk ALLOW_SAME_PHONE_NUMBER. Jangan hapus.
+    ("REGISTRATION_OTP_MODE", "dual", False),
     ("ALLOW_SAME_PHONE_NUMBER", "off", False),  # off = satu nomor WA hanya untuk satu akun (aturan register)
     ("MAINTENANCE_MODE", "off", False),
     ("VGG_THRESHOLD", "40", False),
     ("YOLO_THRESHOLD", "0.25", False),
+    # YOLO_CONFIDENCE (2026-11-12): nama kanonis yang dipakai admin_controller
+    # dan dikirim frontend tab AI. YOLO_THRESHOLD di atas hanya tersimpan
+    # dan tidak dibaca kode mana pun; tanpa kunci ini simpan tab AI juga
+    # ditolak allowlist (kasus yang sama seperti REGISTRATION_OTP_MODE).
+    ("YOLO_CONFIDENCE", "0.25", False),
     ("GEMINI_API_KEY", "", True),
     ("FONNTE_TOKEN", "", True),
     ("WA_API_TOKEN", "", True),
