@@ -36,6 +36,72 @@ from sqlalchemy import case, func, desc
 
 logger = logging.getLogger(__name__)
 
+
+def normalize_chat_question(text: str) -> str:
+    """Normalisasi pertanyaan customer untuk pengelompokan: huruf kecil,
+    buang tanda baca, rapatkan spasi. Pertanyaan yang sama (kata sama,
+    tanda baca/kapital beda) terhitung satu."""
+    t = (text or "").lower()
+    t = re.sub(r"[^\w\s]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def top_customer_questions(db: Session, limit: int = 10):
+    """Pertanyaan customer (role=user) yang paling sering diajukan ke
+    asisten, dikelompokkan berdasarkan teks yang dinormalisasi.
+    Mengembalikan list dict {question, count, last_asked_at, asked_by}
+    terurut jumlah terbanyak dulu. Dipakai endpoint tren chat admin dan
+    fallback chatbot admin — datanya selalu dari ChatMessage, bukan
+    daftar contoh."""
+    rows = (
+        db.query(ChatMessage.content, User.name, ChatMessage.created_at)
+        .join(User, ChatMessage.user_id == User.id)
+        .filter(User.role == "customer", ChatMessage.role == "user")
+        .order_by(desc(ChatMessage.created_at))
+        .limit(500)
+        .all()
+    )
+    grouped = {}
+    for content, name, created_at in rows:
+        key = normalize_chat_question(content)
+        if not key or len(key) < 3:
+            continue
+        g = grouped.get(key)
+        if g is None:
+            # Baris sudah terurut terbaru dulu: wording pertama = terbaru.
+            g = grouped[key] = {
+                "question": (content or "").strip(),
+                "count": 0,
+                "last_asked_at": created_at,
+                "asked_by": [],
+            }
+        g["count"] += 1
+        if name and name not in g["asked_by"]:
+            g["asked_by"].append(name)
+    out = sorted(
+        grouped.values(),
+        key=lambda g: (
+            -g["count"],
+            -(g["last_asked_at"].timestamp() if g["last_asked_at"] else 0),
+        ),
+    )
+    return out[: max(1, limit)]
+
+
+def find_user_by_name(db: Session, msg_lower: str, role: str | None = None):
+    """Cari user yang namanya disebut di pesan (nama lengkap atau kata
+    pertama nama). Dipakai fallback chatbot admin untuk 'baca chat <nama>'
+    dan 'berapa kali <nama> scan'."""
+    q = db.query(User.id, User.name, User.email)
+    if role:
+        q = q.filter(User.role == role)
+    for u in q.all():
+        for cand in {u.name.lower(), u.name.lower().split()[0]}:
+            if cand and len(cand) >= 3 and re.search(r"\b" + re.escape(cand) + r"\b", msg_lower):
+                return u
+    return None
+
+
 # ─────────────────────────────────────────────────────────
 # 1. SAFETY & DOMAIN GUARDRAIL LAYER
 # ─────────────────────────────────────────────────────────
@@ -1218,68 +1284,49 @@ class AIOrchestrator:
                     "tren masalah kulit pengguna, sampai log aktivitas. Kalau mau tanya soal perawatan kulit juga boleh."
                 )
 
-            # 1. Customer Chat Trends (identifikasi chat, sering nanya apa, ngeluh apa, minta apa)
-            if any(w in msg_lower for w in ["chat", "obrolan", "keluh", "nanya", "minta", "tren pertanyaan", "identifikasi chat", "pertanyaan customer", "pertanyaan user"]):
-                cust_chat_records = db.query(ChatMessage.content, User.name, ChatMessage.created_at).join(
-                    User, ChatMessage.user_id == User.id
-                ).filter(
-                    User.role == "customer",
-                    ChatMessage.role == "user"
-                ).order_by(desc(ChatMessage.created_at)).limit(35).all()
-
-                faq_items = [
-                    "Edukasi bahan aktif skincare (efektivitas dan cara pakai Niacinamide, BHA/Salicylic Acid, Retinol).",
-                    "Penyebab dan pemicu jerawat di wajah serta cara kerja pori-pori tersumbat sebum.",
-                    "Perbedaan kemerahan biasa dengan indikasi medis seperti rosacea.",
-                    "Penjelasan cara membaca hasil scan kulit wajah dan hasil cek sunscreen."
-                ]
-                complaint_items = [
-                    "Jerawat meradang, beruntusan di area T-zone, dan bekas noda jerawat kehitaman.",
-                    "Kulit kusam dengan hiperpigmentasi / flek hitam yang sulit memudar.",
-                    "Iritasi, wajah merah, atau bengkak setelah mencoba produk skincare baru.",
-                    "Kulit dehidrasi / kombinasi kering di beberapa area namun berminyak di area hidung."
-                ]
-                request_items = [
-                    "Rekomendasi sunscreen lokal BPOM yang ringan dan tidak menyumbat pori untuk kulit berminyak.",
-                    "Tautan resmi pembelian produk langsung di marketplace (khususnya Shopee).",
-                    "Rekomendasi skincare hemat biaya namun efektif untuk mengatasi jerawat dan barrier kulit.",
-                    "Rekomendasi kandungan aktif yang wajib ada untuk masalah kulit spesifik mereka."
-                ]
-
-                # Also get disease stats
-                avg_m = db.query(
-                    func.avg(AnalysisResult.acne_score).label("acne"),
-                    func.avg(AnalysisResult.dry_skin_score).label("dry"),
-                    func.avg(AnalysisResult.oily_skin_score).label("oily"),
-                    func.avg(AnalysisResult.dark_spots_score).label("dark_spots"),
-                    func.avg(AnalysisResult.wrinkles_score).label("wrinkles"),
-                    func.avg(AnalysisResult.overall_score).label("overall"),
-                ).first()
-
-                acne_v = round(getattr(avg_m, 'acne', 0) or 0, 1)
-                dry_v = round(getattr(avg_m, 'dry', 0) or 0, 1)
-                oily_v = round(getattr(avg_m, 'oily', 0) or 0, 1)
-                spots_v = round(getattr(avg_m, 'dark_spots', 0) or 0, 1)
-                wrinkles_v = round(getattr(avg_m, 'wrinkles', 0) or 0, 1)
-                overall_v = round(getattr(avg_m, 'overall', 0) or 0, 1)
-
-                res = [
-                    "**Hasil Analisis Obrolan & Tren Customer (Database SkinCheck):**\n",
-                    "**1. Pertanyaan yang Paling Sering Diajukan Customer (Frequently Asked / FAQ):**",
-                    *[f"• {item}" for item in faq_items],
-                    "\n**2. Keluhan yang Paling Sering Disampaikan Customer (Complaints & Concerns):**",
-                    *[f"• {item}" for item in complaint_items],
-                    "\n**3. Permintaan yang Paling Sering Diajukan Customer (Demands & Requests):**",
-                    *[f"• {item}" for item in request_items],
-                    f"\n**4. Tren Penyakit Kulit Seluruh User (Platform Clinical Averages):**",
-                    f"• Jerawat (Acne): {acne_v}/100 (Masalah paling dominan)",
-                    f"• Kulit Kering (Dry Skin): {dry_v}/100",
-                    f"• Kulit Berminyak (Oily Skin): {oily_v}/100",
-                    f"• Flek & Noda Hitam (Dark Spots): {spots_v}/100",
-                    f"• Kerutan / Garis Halus (Wrinkles): {wrinkles_v}/100",
-                    f"• Rerata Skor Kesehatan Keseluruhan: {overall_v}/100"
-                ]
-                return "\n".join(res)
+            # 1. Obrolan customer — tren pertanyaan + baca riwayat chat customer.
+            # (2026-11-13) Daftar FAQ/keluhan/permintaan di sini sebelumnya
+            # HARDCODED (data contoh), padahal query riwayat diambil tapi tidak
+            # pernah dipakai. Sekarang semuanya dari ChatMessage yang sebenarnya,
+            # supaya admin bisa melihat customer kebingungan di fitur apa dan
+            # pertanyaan apa yang paling sering muncul (bahan update).
+            if any(w in msg_lower for w in ["chat", "obrolan", "keluh", "nanya", "minta", "tren pertanyaan", "identifikasi chat", "pertanyaan customer", "pertanyaan user", "riwayat chat", "baca chat", "sering nanya", "sering ditanya"]):
+                # (a) Baca riwayat chat satu customer — nama disebut di pertanyaan.
+                if any(w in msg_lower for w in ["baca chat", "riwayat chat", "chatnya", "obrolan"]):
+                    target = find_user_by_name(db, msg_lower, role="customer")
+                    if target:
+                        recent = (
+                            db.query(ChatMessage)
+                            .filter(ChatMessage.user_id == target.id)
+                            .order_by(ChatMessage.created_at.desc())
+                            .limit(8)
+                            .all()
+                        )
+                        if not recent:
+                            return f"{target.name} ({target.email}) belum pernah chat dengan asisten."
+                        lines = [f"Riwayat chat {target.name} ({target.email}) — {len(recent)} pesan terakhir:"]
+                        for m in reversed(recent):
+                            who = "Customer" if m.role == "user" else "Asisten"
+                            text = (m.content or "").strip().replace("\n", " ")
+                            if len(text) > 160:
+                                text = text[:160] + "…"
+                            lines.append(f"• {who}: {text}")
+                        return "\n".join(lines)
+                # (b) Tren pertanyaan customer — data sebenarnya.
+                top = top_customer_questions(db, limit=5)
+                total_q = (
+                    db.query(ChatMessage)
+                    .join(User, ChatMessage.user_id == User.id)
+                    .filter(User.role == "customer", ChatMessage.role == "user")
+                    .count()
+                )
+                if not top:
+                    return "Belum ada customer yang chat dengan asisten, jadi belum ada tren pertanyaan."
+                lines = [f"Customer sudah mengajukan {total_q} pertanyaan ke asisten. Yang paling sering ditanyakan:"]
+                for i, t in enumerate(top, 1):
+                    askers = ", ".join(t["asked_by"][:3]) or "customer"
+                    lines.append(f"{i}. \"{t['question']}\" — {t['count']} kali (oleh {askers})")
+                return "\n".join(lines)
 
             # 2. Disease / Health Trends Query
             if any(w in msg_lower for w in ["tren penyakit", "penyakit kulit", "kondisi kulit", "masalah kulit", "tren kulit", "rerata skor", "rata-rata kulit", "masalah kulit terbanyak"]):
@@ -1360,14 +1407,7 @@ class AIOrchestrator:
                     return res
                 # (b) Berapa kali <nama user> scan — nama disebut di pertanyaan.
                 if "berapa" in msg_lower:
-                    named = None
-                    for u in db.query(User.id, User.name, User.email).all():
-                        for cand in {u.name.lower(), u.name.lower().split()[0]}:
-                            if cand and len(cand) >= 3 and re.search(r"\b" + re.escape(cand) + r"\b", msg_lower):
-                                named = u
-                                break
-                        if named:
-                            break
+                    named = find_user_by_name(db, msg_lower)
                     if named:
                         n_total = db.query(SkinScan).filter(SkinScan.user_id == named.id).count()
                         n_ok = db.query(SkinScan).filter(SkinScan.user_id == named.id, SkinScan.status == "completed").count()

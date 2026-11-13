@@ -777,6 +777,176 @@ async def admin_scan_trends(request: Request, db: Session = Depends(get_db)):
         return _db_unavailable()
 
 
+@router.get("/chats")
+async def admin_customer_chats(
+    request: Request,
+    q: str = "",
+    page: int = 1,
+    per_page: int = 10,
+    db: Session = Depends(get_db),
+):
+    """Monitoring obrolan customer (admin only).
+
+    Daftar customer yang pernah chat dengan asisten, diurutkan dari yang
+    terakhir chat. Per customer: jumlah pesan, isi pesan terakhir + siapa
+    pengirimnya + waktunya. Dipakai halaman Obrolan Customer.
+    """
+    _require_admin(request)
+    page, per_page = _page_params(page, per_page)
+    try:
+        sub = (
+            db.query(
+                ChatMessage.user_id.label("user_id"),
+                func.count(ChatMessage.id).label("total"),
+                func.max(ChatMessage.created_at).label("last_at"),
+            )
+            .join(User, ChatMessage.user_id == User.id)
+            .filter(User.role == "customer")
+            .group_by(ChatMessage.user_id)
+            .subquery()
+        )
+        base = db.query(User, sub.c.total, sub.c.last_at).join(sub, User.id == sub.c.user_id)
+        if q:
+            like = f"%{q}%"
+            base = base.filter((User.name.ilike(like)) | (User.email.ilike(like)))
+        total = base.count()
+        rows = (
+            base.order_by(sub.c.last_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+            .all()
+        )
+        items = []
+        for u, total_msgs, _last_at in rows:
+            last = (
+                db.query(ChatMessage)
+                .filter(ChatMessage.user_id == u.id)
+                .order_by(ChatMessage.created_at.desc())
+                .first()
+            )
+            items.append(
+                {
+                    "user_id": u.id,
+                    "name": u.name,
+                    "email": u.email,
+                    "status": u.status,
+                    "total_messages": total_msgs,
+                    "last_message": last.content if last else None,
+                    "last_message_role": last.role if last else None,
+                    "last_message_at": _iso_utc(last.created_at) if last and last.created_at else None,
+                }
+            )
+        data = _paginate(items, total, page, per_page)
+        data["chats"] = data.pop("items")
+        return JSONResponse(content=data)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("admin chats failed: %s", e)
+        return _db_unavailable()
+
+
+@router.get("/chats/{user_id}")
+async def admin_customer_chat_detail(
+    request: Request,
+    user_id: int,
+    page: int = 1,
+    per_page: int = 50,
+    db: Session = Depends(get_db),
+):
+    """Riwayat chat satu customer (admin only).
+
+    Dipakai halaman Obrolan Customer saat admin membuka percakapan satu
+    customer — untuk membantu customer yang kebingungan di suatu fitur.
+    Pesan dikembalikan kronologis (terlama dulu) dalam halaman terbaru.
+    """
+    _require_admin(request)
+    page, per_page = _page_params(page, per_page)
+    try:
+        user = db.query(User).filter(User.id == user_id, User.role == "customer").first()
+        if not user:
+            return JSONResponse(status_code=404, content={"detail": "Customer tidak ditemukan."})
+        total = db.query(ChatMessage).filter(ChatMessage.user_id == user_id).count()
+        msgs = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.user_id == user_id)
+            .order_by(ChatMessage.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+            .all()
+        )
+        msgs = list(reversed(msgs))
+        data = _paginate(
+            [
+                {
+                    "id": m.id,
+                    "role": m.role,
+                    "content": m.content,
+                    "created_at": _iso_utc(m.created_at) if m.created_at else None,
+                }
+                for m in msgs
+            ],
+            total,
+            page,
+            per_page,
+        )
+        data["messages"] = data.pop("items")
+        data["user"] = {"id": user.id, "name": user.name, "email": user.email, "status": user.status}
+        return JSONResponse(content=data)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("admin chat detail failed: %s", e)
+        return _db_unavailable()
+
+
+@router.get("/chat-trends")
+async def admin_chat_trends(
+    request: Request,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+):
+    """Pertanyaan customer yang paling sering ditanyakan (admin only).
+
+    Dikelompokkan dari isi ChatMessage yang sebenarnya (pertanyaan yang
+    sama, beda kapital/tanda baca, terhitung satu). Dipakai halaman
+    Obrolan Customer + chatbot admin — bahan analisis update ke depan.
+    """
+    _require_admin(request)
+    try:
+        from app.services.ai_assistant_service import top_customer_questions
+
+        limit = max(1, min(limit or 10, 20))
+        top = top_customer_questions(db, limit=limit)
+        total_user_messages = (
+            db.query(ChatMessage)
+            .join(User, ChatMessage.user_id == User.id)
+            .filter(User.role == "customer", ChatMessage.role == "user")
+            .count()
+        )
+        total_chatters = (
+            db.query(ChatMessage.user_id)
+            .join(User, ChatMessage.user_id == User.id)
+            .filter(User.role == "customer")
+            .distinct()
+            .count()
+        )
+        return JSONResponse(
+            content={
+                "top_questions": [
+                    {
+                        "question": t["question"],
+                        "count": t["count"],
+                        "last_asked_at": _iso_utc(t["last_asked_at"]) if t["last_asked_at"] else None,
+                        "asked_by": t["asked_by"][:3],
+                    }
+                    for t in top
+                ],
+                "total_user_messages": total_user_messages,
+                "total_chatters": total_chatters,
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("admin chat trends failed: %s", e)
+        return _db_unavailable()
+
+
 @router.get("/ai-copilot")
 async def admin_ai_copilot(request: Request, db: Session = Depends(get_db)):
     _require_admin(request)
