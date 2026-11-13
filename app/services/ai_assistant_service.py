@@ -1331,25 +1331,61 @@ class AIOrchestrator:
                     "Silakan sebutkan bagian file atau fitur spesifik yang ingin dimodifikasi, dan solusi kode langsung siap diimplementasikan."
                 )
 
-            # 4. Users snapshot
-            if any(w in msg_lower for w in ["user", "pengguna", "customer", "member"]):
-                total_users = db.query(User).count()
-                customers = db.query(User).filter(User.role == "customer").count()
-                admins = db.query(User).filter(User.role == "admin").count()
-                active = db.query(User).filter(User.status == "active").count()
-                recent_users = db.query(User).order_by(User.created_at.desc()).limit(5).all()
-                res = [
-                    f"**Data Pengguna Website:**",
-                    f"• Total Terdaftar: {total_users} orang (Customer: {customers}, Admin: {admins})",
-                    f"• Status: {active} Aktif, {total_users - active} Non-aktif\n",
-                    f"**5 Pengguna Terdaftar Terbaru:**"
-                ]
-                for u in recent_users:
-                    res.append(f"• #{u.id} {u.name} ({u.email}) — Role: {u.role}, Status: {u.status}")
-                return "\n".join(res)
-
-            # 5. Scans snapshot (total + 5 scan terbaru beserta pemiliknya)
+            # 4. Pertanyaan soal SCAN — dicek SEBELUM snapshot pengguna.
+            # (2026-11-13) "berapa total scan yang dilakukan oleh seluruh
+            # pengguna" mengandung kata "pengguna", tapi yang ditanya adalah
+            # scan — cabang pengguna yang dicek duluan malah menampilkan
+            # data pengguna. Jadi semua pertanyaan ber-kata "scan" masuk
+            # sini dulu, dan pertanyaan yang spesifik dijawab to-the-point
+            # (1-2 kalimat), bukan laporan panjang.
             if any(w in msg_lower for w in ["scan", "pemindaian", "foto"]):
+                # (a) Siapa yang paling banyak scan — agregasi per akun.
+                if any(w in msg_lower for w in ["paling banyak", "paling sering", "tersering", "terbanyak", "paling aktif", "paling rajin"]):
+                    top = (
+                        db.query(User.name, User.email, func.count(SkinScan.id).label("cnt"))
+                        .join(SkinScan, SkinScan.user_id == User.id)
+                        .group_by(User.id)
+                        .order_by(desc("cnt"), User.name)
+                        .limit(3)
+                        .all()
+                    )
+                    total_scans = db.query(SkinScan).count()
+                    if not top:
+                        return "Belum ada scan sama sekali di website ini."
+                    name0, email0, cnt0 = top[0]
+                    res = f"Yang paling banyak scan itu {name0} ({email0}) — {cnt0} kali dari total {total_scans} scan."
+                    if len(top) > 1:
+                        rest = ", ".join(f"{n} {c} kali" for n, _e, c in top[1:])
+                        res += f" Di bawahnya ada {rest}."
+                    return res
+                # (b) Berapa kali <nama user> scan — nama disebut di pertanyaan.
+                if "berapa" in msg_lower:
+                    named = None
+                    for u in db.query(User.id, User.name, User.email).all():
+                        for cand in {u.name.lower(), u.name.lower().split()[0]}:
+                            if cand and len(cand) >= 3 and re.search(r"\b" + re.escape(cand) + r"\b", msg_lower):
+                                named = u
+                                break
+                        if named:
+                            break
+                    if named:
+                        n_total = db.query(SkinScan).filter(SkinScan.user_id == named.id).count()
+                        n_ok = db.query(SkinScan).filter(SkinScan.user_id == named.id, SkinScan.status == "completed").count()
+                        n_fail = db.query(SkinScan).filter(SkinScan.user_id == named.id, SkinScan.status == "failed").count()
+                        return (
+                            f"{named.name} sudah scan {n_total} kali — "
+                            f"{n_ok} berhasil dianalisis dan {n_fail} gagal."
+                        )
+                # (c) Total scan keseluruhan.
+                if any(w in msg_lower for w in ["total", "jumlah", "berapa"]):
+                    total_scans = db.query(SkinScan).count()
+                    completed = db.query(SkinScan).filter(SkinScan.status == "completed").count()
+                    failed = db.query(SkinScan).filter(SkinScan.status == "failed").count()
+                    return (
+                        f"Total ada {total_scans} scan dari seluruh pengguna — "
+                        f"{completed} berhasil dianalisis dan {failed} gagal."
+                    )
+                # (d) Snapshot scan generik (total + 5 scan terbaru).
                 total_scans = db.query(SkinScan).count()
                 completed = db.query(SkinScan).filter(SkinScan.status == "completed").count()
                 failed = db.query(SkinScan).filter(SkinScan.status == "failed").count()
@@ -1370,6 +1406,23 @@ class AIOrchestrator:
                 for s, owner_name in recent_scans:
                     when = s.created_at.strftime("%d/%m %H:%M") if s.created_at else "-"
                     res.append(f"• Scan #{s.id} — {owner_name} — {s.status} — {when}")
+                return "\n".join(res)
+
+            # 5. Users snapshot
+            if any(w in msg_lower for w in ["user", "pengguna", "customer", "member"]):
+                total_users = db.query(User).count()
+                customers = db.query(User).filter(User.role == "customer").count()
+                admins = db.query(User).filter(User.role == "admin").count()
+                active = db.query(User).filter(User.status == "active").count()
+                recent_users = db.query(User).order_by(User.created_at.desc()).limit(5).all()
+                res = [
+                    f"**Data Pengguna Website:**",
+                    f"• Total Terdaftar: {total_users} orang (Customer: {customers}, Admin: {admins})",
+                    f"• Status: {active} Aktif, {total_users - active} Non-aktif\n",
+                    f"**5 Pengguna Terdaftar Terbaru:**"
+                ]
+                for u in recent_users:
+                    res.append(f"• #{u.id} {u.name} ({u.email}) — Role: {u.role}, Status: {u.status}")
                 return "\n".join(res)
 
             # 6. Products snapshot
