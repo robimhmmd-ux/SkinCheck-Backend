@@ -562,10 +562,21 @@ class ContextBuilder:
             active_users = db.query(User).filter(User.status == "active").count()
             active_customers = db.query(User).filter(User.role == "customer", User.status == "active").count()
             inactive_users = total_users - active_users
-            recent_users = db.query(User).order_by(User.created_at.desc()).limit(8).all()
+            # Daftar LENGKAP (bukan hanya 8 terbaru): jalur pintar harus melihat
+            # semua nama — kalau tidak, model menyebut sebagian lalu MENGARANG
+            # saat diminta daftar lengkap (insiden 2026-11-14 01:51). Cap 50
+            # baris + catatan jujur kalau total melebihi cap.
+            _USER_LIST_CAP = 50
+            all_users = db.query(User).order_by(User.created_at.desc()).limit(_USER_LIST_CAP).all()
+            _users_shown = len(all_users)
+            _users_note = (
+                f" (menampilkan {_users_shown} terbaru dari total {total_users})"
+                if total_users > _users_shown
+                else " (LENGKAP — semua pengguna ada di daftar ini, jangan mengarang tambahan)"
+            )
             user_list_str = "\n".join([
                 f"  • ID #{u.id} | {u.name} | {u.email} | Role: {u.role} | Status: {u.status} | Terdaftar: {u.created_at.strftime('%d-%m-%Y %H:%M')}"
-                for u in recent_users
+                for u in all_users
             ])
 
             # 2. Scans snapshot
@@ -573,10 +584,20 @@ class ContextBuilder:
             scans_today = db.query(SkinScan).filter(func.date(SkinScan.created_at) == today).count()
             completed_scans = db.query(SkinScan).filter(SkinScan.status == "completed").count()
             failed_scans = db.query(SkinScan).filter(SkinScan.status == "failed").count()
-            recent_scans = db.query(SkinScan).order_by(SkinScan.created_at.desc()).limit(5).all()
+            # Daftar LENGKAP (bukan hanya 5 terbaru) + nama pemilik tiap scan —
+            # tanpa nama pemilik, model tidak bisa menjawab "scan siapa".
+            _SCAN_LIST_CAP = 50
+            all_scans = db.query(SkinScan).order_by(SkinScan.created_at.desc()).limit(_SCAN_LIST_CAP).all()
+            _scans_shown = len(all_scans)
+            _scans_note = (
+                f" (menampilkan {_scans_shown} terbaru dari total {total_scans})"
+                if total_scans > _scans_shown
+                else " (LENGKAP — semua scan ada di daftar ini, jangan mengarang tambahan)"
+            )
+            _owner_names = {uid: nm for uid, nm in db.query(User.id, User.name).all()}
             scan_list_str = "\n".join([
-                f"  • Scan #{s.id} | User ID: #{s.user_id} | Status: {s.status} | Kualitas: {s.image_quality_score or '-'} | Waktu: {s.created_at.strftime('%d-%m-%Y %H:%M')}"
-                for s in recent_scans
+                f"  • Scan #{s.id} | Pemilik: {_owner_names.get(s.user_id, f'User #{s.user_id}')} (User ID: #{s.user_id}) | Status: {s.status} | Kualitas: {s.image_quality_score or '-'} | Waktu: {s.created_at.strftime('%d-%m-%Y %H:%M')}"
+                for s in all_scans
             ])
 
             # Analysis success rate
@@ -597,14 +618,37 @@ class ContextBuilder:
                 func.avg(AnalysisResult.wrinkles_score).label("wrinkles"),
             ).first()
 
+            # Label "paling dominan" DIHITUNG dari 5 rata-rata (bukan ditempel
+            # di baris jerawat): sebelumnya hardcoded di baris jerawat, jadi
+            # konteks pintar menyesatkan model saat kondisi tertinggi adalah
+            # yang lain (insiden 2026-11-14 01:27 — berminyak 58,8 tertinggi,
+            # tapi label menempel di jerawat 14,7). Seri/imbang: semua yang
+            # imbang diberi label. Belum ada analisis: tanpa label.
+            if avg_metrics:
+                _avg_total = avg_metrics.total or 0
+                _avg_vals = {
+                    "acne": round(avg_metrics.acne or 0, 1),
+                    "dry": round(avg_metrics.dry or 0, 1),
+                    "oily": round(avg_metrics.oily or 0, 1),
+                    "dark_spots": round(avg_metrics.dark_spots or 0, 1),
+                    "wrinkles": round(avg_metrics.wrinkles or 0, 1),
+                }
+            else:
+                _avg_total = 0
+                _avg_vals = {}
+            _avg_top = max(_avg_vals.values()) if _avg_vals and _avg_total > 0 else None
+
+            def _dom_suffix(_k):
+                return " (Masalah paling dominan)" if _avg_top is not None and _avg_vals.get(_k) == _avg_top else ""
+
             avg_summary = (
-                f"  - Total Analisis Selesai: {avg_metrics.total or 0} scan\n"
+                f"  - Total Analisis Selesai: {_avg_total} scan\n"
                 f"  - Rerata Skor Kesehatan Kulit: {round(avg_metrics.overall or 0, 1)}/100\n"
-                f"  - Rerata Tingkat Jerawat (Acne): {round(avg_metrics.acne or 0, 1)}/100 (Masalah paling dominan)\n"
-                f"  - Rerata Kulit Kering (Dry): {round(avg_metrics.dry or 0, 1)}/100\n"
-                f"  - Rerata Kulit Berminyak (Oily): {round(avg_metrics.oily or 0, 1)}/100\n"
-                f"  - Rerata Flek & Noda Hitam (Dark Spots): {round(avg_metrics.dark_spots or 0, 1)}/100\n"
-                f"  - Rerata Kerutan / Garis Halus: {round(avg_metrics.wrinkles or 0, 1)}/100"
+                f"  - Rerata Tingkat Jerawat (Acne): {_avg_vals['acne']}/100{_dom_suffix('acne')}\n"
+                f"  - Rerata Kulit Kering (Dry): {_avg_vals['dry']}/100{_dom_suffix('dry')}\n"
+                f"  - Rerata Kulit Berminyak (Oily): {_avg_vals['oily']}/100{_dom_suffix('oily')}\n"
+                f"  - Rerata Flek & Noda Hitam (Dark Spots): {_avg_vals['dark_spots']}/100{_dom_suffix('dark_spots')}\n"
+                f"  - Rerata Kerutan / Garis Halus: {_avg_vals['wrinkles']}/100{_dom_suffix('wrinkles')}"
             ) if avg_metrics else "  Belum ada data analisis scan."
 
             # 4. Customer Chat Trends (What customers ask, complain about, and request)
@@ -706,18 +750,34 @@ class ContextBuilder:
                 db_latency_ms = round((time.time() - _t0) * 1000, 1)
             except Exception:
                 db_latency_ms = None
+            # Distribusi 5 Pilar di dashboard kini angka LIVE (kartu dashboard
+            # sudah diperbaiki ke data live 2026-11-13) — pakai rata-rata yang
+            # sama dengan bagian 4, bukan baseline hardcode 34/28/22/18/14 lagi.
+            # Baseline lama (_DASHBOARD_PILLAR_BASELINE) dihapus: angka hardcode
+            # di konteks hanya menyesatkan model.
             pillar_txt = ", ".join(
-                f"{label} {pct}%" for _k, label, pct in _DASHBOARD_PILLAR_BASELINE
+                f"{label} {_avg_vals.get(_k, 0)}%" for _k, label in
+                [("acne", "Jerawat"), ("dry", "Dehidrasi"), ("oily", "Minyak"), ("dark_spots", "Dark spots"), ("wrinkles", "Fine lines")]
+            )
+
+            # Kalimat kelengkapan eksplisit: supaya model tahu daftar pengguna
+            # dan scan di bawah ini lengkap (atau dibatasi jujur) dan tidak
+            # mengarang entri tambahan saat diminta daftar lengkap.
+            _complete_note = (
+                "PENTING: daftar pengguna (bagian 2) dan daftar scan (bagian 3) di bawah ini adalah daftar LENGKAP — setiap nama/ID yang ada di database tercantum di sini. Kalau diminta \"sebutin seluruh pengguna/scan\", sebutkan SEMUA entri dari daftar ini; jangan menambah entri karangan dan jangan mengaku ada yang \"belum tercantum\"."
+                if total_users <= _USER_LIST_CAP and total_scans <= _SCAN_LIST_CAP
+                else f"PENTING: daftar pengguna dan scan di bawah ini DIBATASI 50 entri terbaru (total pengguna {total_users}, total scan {total_scans}) — sebutkan hanya entri yang ada di daftar, sebutkan totalnya dengan jujur, dan jangan mengarang entri tambahan."
             )
 
             return f"""
 DATABASE WEBSITE SKINCHECK (LIVE REPOSITORY SNAPSHOT FOR ADMIN):
+{_complete_note}
 {identity_block}1. KARTU METRIK DASHBOARD ADMIN (persis seperti yang tampil di /admin):
    - Pengguna Terdaftar: {total_users} orang ({active_users} aktif) — Customer: {total_customers}, Admin: {total_admins}
    - Volume Sesi Scan: {total_scans} pemindaian ({scans_today} scan hari ini)
    - Katalog Formulasi: {total_products} produk ({active_products} aktif di marketplace)
    - AI Success Rate: {success_rate} (berhasil dianalisis: {completed_scans} dari {total_scans} scan; gagal: {failed_scans} — rincian dari data scan, bukan teks yang tampil di kartu)
-   - Distribusi 5 Pilar (yang tampil di dashboard — baseline acuan tetap, BUKAN hitungan live): {pillar_txt}
+   - Distribusi 5 Pilar (angka LIVE yang tampil di dashboard — rata-rata dari semua scan yang dianalisis): {pillar_txt}
    - Latensi Database: {db_latency_ms} ms (diukur saat snapshot ini dibuat)
    - Menunggu verifikasi: {len(pending_users)} akun ({pending_names})
    - CATATAN: "AI Sessions" ({total_ai_sessions} pengguna berbeda yang pernah chat) BUKAN kartu dashboard — jangan sajikan sebagai angka dashboard. "Total Customer" ({total_customers}) BUKAN total pengguna — total pengguna = customer + admin = {total_users}. Jangan pernah klaim angka "sama persis dengan dashboard" kecuali memang sama persis dengan kartu di atas.
@@ -725,12 +785,12 @@ DATABASE WEBSITE SKINCHECK (LIVE REPOSITORY SNAPSHOT FOR ADMIN):
 2. TABEL USERS:
    - Total Pengguna: {total_users} (Customer: {total_customers}, Admin: {total_admins})
    - Status Akun: {active_users} Aktif, {inactive_users} Non-aktif
-   - 8 Pengguna Terdaftar Terakhir:
+   - Daftar Seluruh Pengguna{_users_note}:
 {user_list_str}
 
 3. TABEL SKIN_SCANS:
    - Total Pemindaian: {total_scans} (Selesai: {completed_scans}, Gagal: {failed_scans})
-   - 5 Pemindaian Terakhir:
+   - Daftar Seluruh Scan{_scans_note}:
 {scan_list_str}
 
 4. TABEL ANALYSIS_RESULTS (TREN PENYAKIT & KONDISI KULIT KESELURUHAN PENGGUNA):
@@ -1311,19 +1371,10 @@ _CONDITION_ORDER = [
     ("wrinkles", "Kerutan"),
 ]
 
-# Distribusi 5 pilar yang TAMPIL di dashboard admin — baseline acuan
-# TETAP (bukan hitungan live) dari CONDITION_DISTRIBUTION di frontend
-# app/admin/page.js. Dipakai HANYA untuk menjelaskan angka yang tampil
-# di dashboard, selalu dengan label jujur "baseline". Kalau frontend
-# mengubah baseline ini, ubah juga di sini. Rata-rata live dari hasil
-# scan selalu dihitung dari DB (lihat _admin_dashboard_snapshot).
-_DASHBOARD_PILLAR_BASELINE = [
-    ("acne", "Jerawat", 34),
-    ("dry", "Dehidrasi", 28),
-    ("oily", "Minyak", 22),
-    ("dark_spots", "Dark spots", 18),
-    ("wrinkles", "Fine lines", 14),
-]
+# (Dihapus 2026-11-14: _DASHBOARD_PILLAR_BASELINE hardcode 34/28/22/18/14
+# sudah tidak dipakai lagi — Distribusi 5 Pilar di konteks admin dan di
+# jawaban dashboard kini dihitung live dari rata-rata AnalysisResult,
+# sama seperti kartu dashboard.)
 
 
 def _admin_dashboard_snapshot(db: Session) -> dict:
@@ -1360,8 +1411,8 @@ def _admin_dashboard_snapshot(db: Session) -> dict:
     except Exception:
         latency_ms = None
     # Rata-rata live 5 kondisi dari hasil scan yang sudah dianalisis
-    # (data nyata — berbeda dengan baseline pilar yang tampil di
-    # dashboard, lihat _DASHBOARD_PILLAR_BASELINE).
+    # (data nyata — sama dengan yang tampil di kartu Distribusi 5 Pilar
+    # di dashboard).
     avg = db.query(
         func.count(AnalysisResult.id).label("total"),
         func.avg(AnalysisResult.overall_score).label("overall"),
@@ -1409,7 +1460,17 @@ def _admin_dashboard_answer(db: Session, detail: bool = False) -> str:
         if s["pending"]
         else "tidak ada akun yang menunggu verifikasi"
     )
-    pillar_txt = ", ".join(f"{label} {pct}%" for _k, label, pct in _DASHBOARD_PILLAR_BASELINE)
+    # Distribusi 5 Pilar di dashboard kini angka LIVE (bukan baseline hardcode
+    # 34/28/22/18/14 lagi) — pakai rata-rata dari snapshot; kalau belum ada
+    # analisis, katakan jujur belum ada datanya.
+    if s["live_avg"]:
+        _la = s["live_avg"]
+        pillar_txt = ", ".join(
+            f"{label} {_la[k]}%" for k, label in
+            [("acne", "Jerawat"), ("dry", "Dehidrasi"), ("oily", "Minyak"), ("dark_spots", "Dark spots"), ("wrinkles", "Fine lines")]
+        )
+    else:
+        pillar_txt = "belum ada data (belum ada scan yang dianalisis)"
     latency_txt = f"{s['latency_ms']} ms" if s["latency_ms"] is not None else "tidak terukur"
     lines = [
         "Kartu metrik dashboard admin:",
@@ -1430,7 +1491,7 @@ def _admin_dashboard_answer(db: Session, detail: bool = False) -> str:
         f"• Pengguna: dari {s['total_users']} akun terdaftar, {s['active_users']} sudah aktif (lolos verifikasi OTP + biodata); sisanya {s['total_users'] - s['active_users']} belum aktif.",
         f"• Scan: {s['total_scans']} kali pemindaian sejauh ini, {s['scans_today']} di antaranya hari ini.",
         f"• Success rate {rate} mengukur berapa persen scan yang berhasil dianalisis oleh AI (VGG-16) dari seluruh scan yang masuk.",
-        "• Distribusi 5 pilar di atas adalah baseline acuan yang ditampilkan di dashboard (bukan hitungan live).",
+        "• Distribusi 5 pilar di atas adalah rata-rata live dari semua scan yang dianalisis (sama seperti yang tampil di dashboard).",
     ]
     if s["live_avg"]:
         la = s["live_avg"]
