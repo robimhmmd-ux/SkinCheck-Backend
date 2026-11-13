@@ -910,12 +910,6 @@ SETTING_DEFS = [
     ("ALLOW_SAME_PHONE_NUMBER", "off", False),  # off = satu nomor WA hanya untuk satu akun (aturan register)
     ("MAINTENANCE_MODE", "off", False),
     ("VGG_THRESHOLD", "40", False),
-    ("YOLO_THRESHOLD", "0.25", False),
-    # YOLO_CONFIDENCE (2026-11-12): nama kanonis yang dipakai admin_controller
-    # dan dikirim frontend tab AI. YOLO_THRESHOLD di atas hanya tersimpan
-    # dan tidak dibaca kode mana pun; tanpa kunci ini simpan tab AI juga
-    # ditolak allowlist (kasus yang sama seperti REGISTRATION_OTP_MODE).
-    ("YOLO_CONFIDENCE", "0.25", False),
     ("GEMINI_API_KEY", "", True),
     ("FONNTE_TOKEN", "", True),
     ("WA_API_TOKEN", "", True),
@@ -932,7 +926,7 @@ SETTINGS_ALLOWLIST = {key for key, _, _ in SETTING_DEFS}
 #   ai_assistant_service setiap chat.
 # - SCAN_DAILY_QUOTA & MAINTENANCE_MODE dibaca endpoint upload scan.
 # - ALLOW_SAME_PHONE_NUMBER dibaca endpoint register (aturan nomor WA ganda).
-# - OTP_MODE, VGG_THRESHOLD, YOLO_THRESHOLD saat ini hanya tersimpan
+# - OTP_MODE, VGG_THRESHOLD saat ini hanya tersimpan
 #   (alur OTP masih WA-only; threshold belum dipakai inferensi) — jangan
 #   mengklaim sebaliknya di frontend.
 
