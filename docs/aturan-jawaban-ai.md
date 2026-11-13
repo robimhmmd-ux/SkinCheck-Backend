@@ -47,3 +47,5 @@ Fokus pada perawatan kulit wajah non-medis. Kalau di luar domain atau membutuhka
 ## 6. Kalau model AI gagal (fallback lokal)
 
 Kalau panggilan model AI (Gemini/NVIDIA) gagal — kunci salah, kuota habis, atau provider mati — chatbot **jatuh ke jawaban lokal dari database, dan tidak pernah error 500**. Fallback menjawab dari cabang-cabang data asli (jumlah scan, scan terakhir, kondisi kulit, skor per kondisi, status akun, obrolan customer untuk admin) dengan gaya dan disiplin saran yang sama seperti di atas. Kalau pertanyaannya tidak cocok dengan cabang mana pun, fallback menjawab ringkasan natural dari data yang ada — tanpa mengarang angka atau data.
+
+Pengertian istilah dan fitur aplikasi (glosarium): lihat `docs/glosarium-aplikasi.md` — isinya sama dengan `APP_GLOSSARY` di `ai_assistant_service.py`, dipakai fallback lokal untuk menjawab pertanyaan "apa itu ...?" dan disisipkan ringkas ke prompt jalur pintar kalau pertanyaannya memang definisi.

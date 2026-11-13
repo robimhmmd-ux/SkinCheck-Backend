@@ -206,6 +206,14 @@ class SafetyLayer:
             "jerawat saya", "minyak saya", "kulit saya", "skor saya"
         ])
 
+        # Pertanyaan definisi soal konsep aplikasi ("apa itu database") bukan
+        # akses data — biarkan lolos ke cabang glosarium di fallback, yang
+        # hanya berisi pengetahuan umum aplikasi (tanpa data pengguna).
+        # _is_definition_question/_match_glossary didefinisikan di bawah di
+        # modul ini, tapi dipanggil saat runtime (modul sudah termuat penuh).
+        if _is_definition_question(lower) and _match_glossary(lower):
+            return None
+
         # 1. Database scope boundary check for regular customers (prevent accessing others' or system tables)
         if not is_allowed_personal_db:
             for pattern in cls.UNAUTHORIZED_DB_PATTERNS:
@@ -881,6 +889,156 @@ def _call_nvidia_chat(db: Session, prompt_input: str) -> Optional[str]:
         return None
 
 
+# ─────────────────────────────────────────────────────────
+# 5b. GLOSARIUM APLIKASI (pengertian konsep Laomera)
+# ─────────────────────────────────────────────────────────
+# (2026-11-13) Pertanyaan "apa itu ...?" soal aplikasi sebelumnya tidak
+# punya tempat jatuh yang benar: cabang data menjawab dengan ANGKA ("Tidak
+# ada akun yang ditangguhkan saat ini.") dan RAG hanya berisi dokumen
+# SKINCARE. Glosarium ini memberi chatbot pengertian tentang seluruh
+# aplikasi — ditulis dari perilaku nyata kode (bukan karangan). Isi yang
+# sama didokumentasikan di docs/glosarium-aplikasi.md.
+# Urutan entri = urutan pencocokan: yang spesifik dulu (multi-pose sebelum
+# scan, fitur sebelum Laomera).
+APP_GLOSSARY = [
+    ("Akun yang ditangguhkan", ["ditangguhkan", "suspended"],
+     "Akun yang ditangguhkan adalah akun yang dinonaktifkan sementara oleh admin — pemiliknya tidak bisa login dan tidak bisa memakai fitur apa pun sampai admin memulihkannya. Berbeda dengan akun pending (akun baru yang belum selesai verifikasi), akun ditangguhkan adalah akun yang sengaja diberhentikan sementara oleh admin."),
+    ("Akun pending", ["pending", "menunggu verifikasi", "belum verifikasi", "belum terverifikasi"],
+     "Akun pending adalah akun yang baru saja daftar tapi belum verifikasi nomor WhatsApp. Pemiliknya sudah bisa login, tapi semua fitur terkunci sampai dia memasukkan kode OTP 6 angka yang dikirim lewat WhatsApp, lalu melengkapi biodata."),
+    ("Akun menunggu biodata", ["awaiting_biodata", "awaiting biodata", "menunggu biodata", "biodata belum"],
+     "Akun yang sudah lolos verifikasi kode OTP tapi belum melengkapi biodata — nama, umur (5–120 tahun), dan jenis kelamin. Setelah biodatanya diisi, akunnya jadi aktif dan semua fitur terbuka."),
+    ("Akun nonaktif", ["nonaktif", "inactive", "tidak aktif"],
+     "Akun nonaktif adalah akun yang sedang tidak aktif dan pemiliknya tidak bisa login. Biasanya ini akun yang dinonaktifkan oleh admin — tombol hapus di panel Pengguna hanya menonaktifkan akun, bukan menghapusnya permanen, jadi admin bisa mengaktifkannya kembali."),
+    ("Akun aktif", ["akun aktif"],
+     "Akun aktif adalah akun yang sudah menyelesaikan semua tahap verifikasi — kode OTP WhatsApp dan biodata — dan bisa memakai semua fitur aplikasi."),
+    ("Ganti nama akun", ["ganti nama", "ubah nama"],
+     "Bisa — ganti nama akun lewat halaman Profil: ubah kolom nama, lalu tekan Simpan. Nama baru langsung berlaku dan tampil di dashboard serta sidebar. Yang tidak bisa diubah adalah email."),
+    ("Ganti email / Gmail", ["ganti gmail", "ganti email", "ubah email", "ubah gmail", "gmail", "email"],
+     "Tidak bisa — email adalah identitas untuk masuk ke akun, jadi tidak bisa diubah setelah daftar. Di halaman Profil, kolom email memang dikunci. Kalau kamu perlu pakai email lain, daftar akun baru dengan email itu."),
+    ("Ganti password", ["ganti password", "ubah password", "lupa password"],
+     "Customer tidak bisa ganti password sendiri — tidak ada fitur ganti password di halaman Profil. Kalau lupa password, minta admin untuk mengatur ulang passwordmu lewat halaman Pengguna. Admin bisa ganti passwordnya sendiri lewat Profil Admin, dengan memasukkan password lama (password baru minimal 6 karakter)."),
+    ("Admin menonaktifkan diri sendiri", ["menonaktifkan diri", "nonaktifkan diri", "menonaktifkan akun sendiri", "nonaktifkan akun sendiri", "menonaktifkan saya", "nonaktifkan saya"],
+     "Tidak bisa — admin tidak bisa menonaktifkan akunnya sendiri, supaya website tidak sampai kehilangan adminnya. Kalau akun admin perlu dinonaktifkan, harus dilakukan oleh admin lain. Aturan yang sama berlaku untuk menghapus akun admin sendiri."),
+    ("Hapus akun", ["hapus akun", "hapus akun saya"],
+     "Customer tidak bisa menghapus akunnya sendiri — tidak ada tombol hapus akun di halaman Profil; kalau akunmu memang harus dihapus, minta admin untuk menonaktifkannya lewat halaman Pengguna. Admin menghapus pengguna lewat tombol hapus di halaman Pengguna — itu hanya menonaktifkan akun (status jadi nonaktif), bukan menghapus permanen."),
+    ("Verifikasi akun", ["verifikasi akun", "cara verifikasi", "verifikasi", "verif"],
+     "Verifikasi akun ada tiga langkah: daftar (akun jadi pending), lalu masukkan kode OTP 6 angka yang dikirim ke WhatsApp (kode berlaku 10 menit dan sekali pakai), lalu isi biodata (nama, umur 5–120 tahun, jenis kelamin). Setelah itu akun jadi aktif dan semua fitur terbuka."),
+    ("OTP", ["kode otp", "otp", "kode verifikasi"],
+     "OTP adalah kode 6 angka yang dikirim ke nomor WhatsApp kamu saat verifikasi akun. Kodenya berlaku 10 menit, sekali pakai, dan kalau mau minta ulang harus menunggu 60 detik. Kodenya tidak pernah ditampilkan di aplikasi — cuma kamu yang bisa melihatnya di WhatsApp."),
+    ("Cara chat dengan asisten", ["chat dengan asisten", "cara chat", "chat asisten", "cara ngobrol", "tombol chat"],
+     "Buka tombol chat di pojok kanan bawah (ikon balon percakapan) — asisten Laomera siap menjawab soal kondisi kulitmu, produk, dan data akunmu. Riwayat chatmu tersimpan dan bisa dibuka lagi kapan pun; riwayat itu terhapus otomatis saat kamu logout."),
+    ("Admin menambah produk / pengguna", ["tambah produk", "menambah produk", "tambah pengguna", "menambah pengguna", "tambah customer", "menambah customer", "buat produk", "buat pengguna", "tambah akun"],
+     "Admin menambah produk lewat halaman Produk (tombol 'Tambah Produk', isi merek, nama, kategori, deskripsi, kandungan, dan tautan Shopee/Tokopedia), dan menambah pengguna lewat halaman Pengguna (tombol 'Tambah Customer', isi nama, email, dan peran)."),
+    # Entri fitur admin (nama dua kata) diletakkan SEBELUM entri Scan — kalau
+    # tidak, "apa itu tren scan" direbut alias "scan" yang lebih generik.
+    ("AI Copilot", ["ai copilot", "copilot"],
+     "AI Copilot adalah halaman admin yang membaca tren masalah kulit pengguna dan mengusulkan produk apa yang sebaiknya ditambah ke katalog — misalnya kalau rata-rata jerawat pengguna tinggi tapi produk anti-jerawat di katalog masih sedikit."),
+    ("Obrolan Customer", ["obrolan customer", "obrolan"],
+     "Obrolan Customer adalah halaman admin untuk memantau pertanyaan yang diajukan customer ke chatbot — admin bisa melihat pertanyaan yang paling sering ditanyakan dan membaca riwayat chat tiap customer, supaya tahu fitur apa yang membingungkan dan update apa yang dibutuhkan."),
+    ("Tren Scan", ["tren scan", "tren"],
+     "Tren Scan adalah halaman admin yang menampilkan rata-rata skor 5 kondisi kulit dari semua pengguna, kondisi yang paling dominan, dan rekomendasi produk untuk tiap kondisi."),
+    ("Audit Scan", ["audit scan"],
+     "Audit Scan adalah halaman admin yang menampilkan semua pemindaian dari semua pengguna beserta status dan hasilnya — admin bisa memeriksa scan siapa saja, kapan, dan berhasil atau gagal."),
+    ("Log Aktivitas", ["log aktivitas", "log"],
+     "Log Aktivitas adalah catatan semua kejadian penting di aplikasi — siapa mendaftar, siapa verifikasi, siapa scan — beserta waktunya. Admin melihatnya di halaman Log Aktivitas."),
+    ("Scan multi-pose", ["multi-pose", "multi pose", "12 frame", "12 foto"],
+     "Scan multi-pose adalah scan memakai kamera yang mengambil 12 foto selama 24 detik, dari 6 arah: tengah, kiri, kanan, atas, bawah, dan dekat. Setiap foto yang wajahnya terdeteksi dianalisis, lalu skor-skornya digabung jadi satu hasil."),
+    ("Scan wajah", ["scan wajah", "pemindaian wajah", "pemindaian", "scan"],
+     "Scan adalah pemeriksaan kondisi kulit wajah lewat foto. Ada dua cara: foto tunggal (satu foto langsung dianalisis) dan multi-pose (kamera mengambil 12 foto selama 24 detik dari 6 arah, lalu hasilnya digabung). Caranya: buka halaman Scan Kulit dari sidebar, pilih foto tunggal atau multi-pose, lalu ikuti panduan kameranya sampai selesai."),
+    ("Skor 5 kondisi kulit", ["skor kondisi", "5 kondisi", "lima kondisi", "skor kulit"],
+     "Ada 5 kondisi yang dinilai dari scan: jerawat, kulit kering, kulit berminyak, dark spots (noda hitam), dan kerutan. Setiap kondisi diberi skor 0–100% — ini skor KEPARAHAN: makin tinggi persentasenya, makin kuat kondisi itu terdeteksi di wajahmu."),
+    ("Skor kesehatan keseluruhan", ["skor kesehatan", "overall", "skor keseluruhan"],
+     "Skor kesehatan keseluruhan (overall score) adalah angka 0–100 yang merangkum hasil scanmu: 100 dikurangi rata-rata kelima skor kondisi. Makin tinggi makin sehat — di atas 75 berarti kulitmu prima, di bawah 35 berarti perlu perhatian ekstra."),
+    ("Model AI VGG16", ["model ai", "vgg", "vgg16"],
+     "Model AI yang menilai scanmu adalah VGG16 yang sudah dilatih khusus (file finetuned_best.h5) — model ini membaca foto wajah dan memberi skor 0–100 untuk 5 kondisi: jerawat, kulit kering, kulit berminyak, dark spots, dan kerutan. Model ini hanya menilai seberapa kuat ciri tiap kondisi terlihat di wajah — bukan mengukur luas atau lokasi jerawat."),
+    ("YuNet (deteksi wajah)", ["yunet", "deteksi wajah"],
+     "Sebelum dinilai, wajahmu dideteksi dulu oleh YuNet — kalau di foto tidak ada wajah yang terdeteksi, scan ditolak dan kamu diminta foto ulang. Jadi skor yang keluar selalu dihitung dari wajah, bukan dari latar foto."),
+    ("Modal (AI di cloud)", ["modal"],
+     "Modal adalah layanan cloud tempat model AI dijalankan — saat kamu scan, foto dikirim ke server Modal untuk dianalisis, jadi ponsel atau laptopmu tidak perlu menjalankan modelnya sendiri."),
+    ("TiDB (database)", ["tidb", "database", "basis data"],
+     "TiDB adalah database yang dipakai aplikasi ini di server (database MySQL yang berjalan di cloud) — semua data akun, hasil scan, produk, dan pengaturan tersimpan di sana."),
+    ("Fonnte (OTP WhatsApp)", ["fonnte", "whatsapp"],
+     "Fonnte adalah layanan yang mengirim kode OTP ke WhatsApp kamu saat verifikasi akun. Kalau kode OTP tidak sampai, biasanya masalahnya ada di pengaturan Fonnte (tokennya) — aplikasinya sendiri tetap jalan."),
+    ("Marketplace", ["marketplace"],
+     "Marketplace adalah katalog produk skincare di aplikasi — kamu bisa cari produk berdasarkan kategori (face wash, toner, serum, moisturizer, sunscreen, mask, eksfoliator) dan membelinya lewat tautan Shopee atau Tokopedia di tiap produk. Tidak ada keranjang atau pembayaran di dalam aplikasi."),
+    ("Riwayat & Diagnosis", ["riwayat & diagnosis", "riwayat", "diagnosis"],
+     "Riwayat & Diagnosis adalah arsip semua scan yang pernah kamu lakukan, lengkap dengan skor tiap kondisi dan perbandingan dengan scan sebelumnya — jadi kamu bisa melihat progres kesehatan kulitmu dari waktu ke waktu. Caranya: buka halaman Riwayat & Diagnosis dari sidebar — semua scanmu tampil dari yang terbaru. Panel 'Diagnosis Terkini' di atasnya menampilkan hasil scan terbarumu."),
+    ("Produk", ["katalog produk", "katalog", "produk"],
+     "Produk adalah item skincare di katalog aplikasi (marketplace) — masing-masing punya merek, nama, kategori, deskripsi, kandungan, dan tautan Shopee/Tokopedia. Admin mengelolanya di halaman Produk; rekomendasi produk ke customer hanya muncul kalau customer yang memintanya."),
+    ("Akun admin", ["akun admin", "siapa saja admin", "daftar admin"],
+     "Admin adalah pengelola aplikasi: dia bisa melihat dan mengatur pengguna, produk, audit scan, tren kulit, obrolan customer, konfigurasi, dan log aktivitas. Admin juga bisa menangguhkan atau menonaktifkan akun, dan mengubah status verifikasi pengguna."),
+    ("Customer", ["customer", "pengguna"],
+     "Customer adalah pengguna biasa aplikasi: dia bisa scan kulit, melihat dashboard dan riwayat diagnosisnya, belanja di marketplace, dan chat dengan asisten AI — tapi hanya soal akun dan kulitnya sendiri, bukan data pengguna lain."),
+    ("Provider AI (Gemini / NVIDIA)", ["provider ai", "provider", "model ai", "gemini", "nvidia", "kunci api", "api key", "api keys"],
+     "Chatbot Laomera bisa memakai dua penyedia AI: Gemini (Google) atau NVIDIA (model Llama lewat API yang kompatibel dengan OpenAI). Admin memilihnya di Konfigurasi → tab AI, mengisi kunci API-nya, dan perubahannya langsung berlaku tanpa restart. Kalau kuncinya salah atau providernya mati, chatbot tetap menjawab dari jawaban lokal, bukan error."),
+    ("Konfigurasi admin", ["konfigurasi", "pengaturan", "settings"],
+     "Konfigurasi adalah halaman pengaturan admin (menu Konfigurasi) dengan tiga tab: AI (provider Gemini/NVIDIA, kunci API, model, dan kuota), OTP (verifikasi WhatsApp dan aturan nomor), dan Admin (pengaturan akun admin). Perubahan di sana langsung berlaku tanpa restart."),
+    ("Teknologi aplikasi", ["teknologi", "next.js", "nextjs", "fastapi", "vercel", "frontend", "backend", "dibangun dengan", "dibuat dengan"],
+     "Aplikasi ini dibangun dengan frontend Next.js dan backend FastAPI, dan di-hosting di Vercel — setiap kali ada perubahan kode yang di-push ke GitHub, websitenya langsung diperbarui otomatis."),
+    ("Fitur aplikasi", ["fitur"],
+     "Fitur aplikasi untuk customer: Dashboard (ringkasan kondisi kulit), Scan Kulit (foto tunggal atau multi-pose 12 foto), Riwayat & Diagnosis (arsip scan + perbandingan), Marketplace (katalog produk skincare), dan chatbot Laomera Asisten. Untuk admin, tambahannya: Pengguna, Produk, Audit Scan, AI Copilot, Obrolan Customer, Tren Scan, Konfigurasi, Log Aktivitas, dan Profil Admin."),
+    ("Laomera", ["laomera", "skincheck", "aplikasi ini", "aplikasi"],
+     "Laomera (dulu bernama SkinCheck) adalah aplikasi web AI untuk memeriksa kesehatan kulit wajah — scan foto wajahmu, dapatkan skor 5 kondisi kulit, lalu dapatkan rekomendasi produk yang cocok."),
+]
+
+DEFINITION_TRIGGERS = [
+    "apa itu", "apa yang dimaksud", "apa artinya", "apa maksud",
+    "jelaskan", "maksudnya", "apa bedanya", "bedanya",
+    "gimana cara", "bagaimana cara", "bagaimana saya", "gimana saya", "bagaimana",
+    "apa fungsi", "fungsinya", "apa kegunaan", "untuk apa", "buat apa",
+    "apakah bisa", "apakah boleh", "bolehkah", "bisakah", "bisa saya",
+    "apa sih", "apa tuh", "fitur apa", "cara ",
+    "teknologi apa", "apa yang dipakai", "dipakai untuk", "digunakan", "dibangun",
+    "lupa password", "ganti password", "ubah password",
+]
+
+# Pertanyaan soal HASIL scan sendiri (bukan pengertian konsep) — glosarium
+# tidak boleh merebutnya; biarkan jatuh ke cabang data scan.
+_OWN_RESULT_MARKERS = ["hasil scan", "hasil cek", "scan terakhir", "terakhir saya", "skor saya", "skor aku"]
+
+
+def _is_definition_question(msg_lower: str) -> bool:
+    """Apakah pesan ini menanyakan pengertian/cara, bukan data?"""
+    if any(t in msg_lower for t in DEFINITION_TRIGGERS):
+        return True
+    # "apakah X bisa ..." — subjek di tengah ("apakah admin bisa ...").
+    return "apakah" in msg_lower and "bisa" in msg_lower
+
+
+def _match_glossary(msg_lower: str):
+    """Kembalikan entri glosarium yang disebut di pesan, sesuai urutan
+    APP_GLOSSARY (yang spesifik dulu). List kosong = tidak ada konsep
+    aplikasi yang cocok; pemanggil harus membiarkan pesan jatuh ke cabang
+    berikutnya, bukan mengarang jawaban.
+    Alias harus berdiri sendiri (bukan bagian kata lain): "log" di
+    "teknologi" atau "produk" di "produksi" tidak cocok — tapi akhiran
+    umum (-nya/-ku/-mu) tetap dihitung cocok ("menonaktifkan dirinya")."""
+    matched = []
+    for title, aliases, text in APP_GLOSSARY:
+        for a in aliases:
+            pat = r"(?<![a-z])" + re.escape(a) + r"(?:nya|ku|mu|lah|kah|pun)?(?![a-z])"
+            if re.search(pat, msg_lower):
+                matched.append((title, text))
+                break
+    return matched
+
+
+def _glossary_answer(msg_lower: str):
+    """Jawaban definisi untuk satu pesan, atau None kalau bukan pertanyaan
+    definisi / tidak ada konsep yang cocok / yang ditanya itu hasil scan
+    sendiri. Dipakai fallback admin dan customer, serta _build_prompt."""
+    if not _is_definition_question(msg_lower):
+        return None
+    if any(w in msg_lower for w in _OWN_RESULT_MARKERS):
+        return None
+    matched = _match_glossary(msg_lower)
+    if not matched:
+        return None
+    if "bedanya" in msg_lower and len(matched) >= 2:
+        return "\n\n".join(f"**{t}:** {x}" for t, x in matched[:2])
+    return matched[0][1]
+
+
 class AIOrchestrator:
     """
     Orchestrates the entire AI Chatbot flow:
@@ -989,6 +1147,11 @@ class AIOrchestrator:
     def _build_prompt(self, db: Session, user_id: int, message: str, scan_id, role: str, history_str: str, rag_docs) -> str:
         """Assemble the exact prompt chat() used to build inline, so the
         streaming and non-streaming paths cannot drift apart."""
+        # Glosarium ringkas (hanya kalau pertanyaannya memang definisi) supaya
+        # jalur pintar (Gemini/NVIDIA) juga bisa menjawab "apa itu ...?" dari
+        # pengertian yang sama dengan fallback — tanpa mengubah prompt lain.
+        _glossary_hits = _match_glossary(message.lower()) if _is_definition_question(message.lower()) else []
+        glossary_text = "\n".join(f"- **{t}:** {x}" for t, x in _glossary_hits) if _glossary_hits else ""
         if role == "admin":
             admin_row = db.query(User).filter(User.id == user_id).first()
             admin_info = (
@@ -1013,6 +1176,11 @@ class AIOrchestrator:
                 f"- Jangan menyapa di awal kecuali pesan admin cuma sapaan.\n"
                 f"- Angka, ID, dan nama harus dari snapshot database di atas — jangan mengarang. "
                 f"\"Siapa saya\" dijawab dari blok identitas admin di snapshot (nama + ID pengguna), bukan ID scan."
+                + (
+                    f"\n\nGLOSARIUM APLIKASI (kalau admin bertanya pengertian istilah/fitur, jawab dari sini, jangan mengarang):\n{glossary_text}"
+                    if glossary_text
+                    else ""
+                )
             )
         user_context = ContextBuilder.build_user_context(user_id, db, scan_id)
         need_products = self._needs_products(message, history_str)
@@ -1040,6 +1208,11 @@ class AIOrchestrator:
             f"5. DILARANG merekomendasikan produk atau mencantumkan link pembelian KECUALI jika pengguna secara eksplisit memintanya.\n"
             f"6. Jika ditanya rerata kondisi kulit (jerawat, minyak, kekeringan, noda hitam, kerutan), WAJIB dalam format PERSEN (%) yang sinkron dengan dashboard.\n"
             f"7. Gunakan bahasa netral dan hangat, tanpa ungkapan religius spesifik."
+            + (
+                f"\n8. Kalau pertanyaan soal pengertian istilah/fitur aplikasi, jawab dari GLOSARIUM berikut (jangan mengarang):\n{glossary_text}"
+                if glossary_text
+                else ""
+            )
         )
 
     @staticmethod
@@ -1349,11 +1522,18 @@ class AIOrchestrator:
         product_indicators = [
             "rekomendasi", "rekomendasikan", "produk", "skincare", "beli", "link",
             "shopee", "tokopedia", "store", "toko", "merk", "brand", "cari",
-            "pakai apa", "pake apa", "pilihan produk", "katalog", "jual", "harga",
+            "pakai apa", "pake apa", "pilihan produk", "katalog", "jual",
             "saran produk", "rekomendasi produk", "kandungan apa yang cocok",
             "bahan apa yang cocok", "serum apa", "sunscreen apa", "moisturizer apa"
         ]
-        return any(ind in msg_lower for ind in product_indicators)
+        if any(ind in msg_lower for ind in product_indicators):
+            return True
+        # "harga" saja (mis. "berapa harga bitcoin") bukan permintaan produk —
+        # harus ada konteks produk/kulit, kalau tidak pertanyaan itu jatuh ke
+        # cabang batasan domain, bukan daftar produk acak.
+        if "harga" in msg_lower:
+            return any(sk in msg_lower for sk in SafetyLayer.SKIN_KEYWORDS)
+        return False
 
     def _wants_advice(self, msg_lower: str) -> bool:
         """Apakah user secara eksplisit meminta saran perawatan?
@@ -1479,6 +1659,16 @@ class AIOrchestrator:
                     "misalnya jumlah pengguna, siapa yang paling sering scan, scan terbaru, produk di katalog, "
                     "tren masalah kulit pengguna, sampai log aktivitas. Kalau mau tanya soal perawatan kulit juga boleh."
                 )
+
+            # 0b. Definisi / pengertian konsep aplikasi (glosarium).
+            # (2026-11-13) "apa itu akun yang ditangguhkan" sebelumnya dijawab
+            # cabang 4b dengan JUMLAH akun ditangguhkan — padahal yang ditanya
+            # itu PENGERTIAN, bukan data. Cabang ini dicek sebelum cabang data
+            # (chat, tren, scan, 4b, pengguna, RAG) karena pertanyaan definisi
+            # mengandung kata yang sama ("akun", "ditangguhkan", "verifikasi").
+            _def_answer = _glossary_answer(msg_lower)
+            if _def_answer is not None:
+                return _def_answer
 
             # 1. Obrolan customer — tren pertanyaan + baca riwayat chat customer.
             # (2026-11-13) Daftar FAQ/keluhan/permintaan di sini sebelumnya
@@ -1794,19 +1984,38 @@ class AIOrchestrator:
                     f"Angka-angka di atas sama persis dengan yang tampil di kartu metrik dashboard admin."
                 )
 
-            # Default admin database summary (natural, bukan laporan sistem)
-            total_users = db.query(User).count()
-            total_scans = db.query(SkinScan).count()
-            total_prods = db.query(Product).count()
+            # Default admin — pertanyaan di luar cabang data/glosarium/skincare.
+            # (2026-11-13) Dulu: ringkasan angka DB untuk pertanyaan apa pun yang
+            # tidak cocok — menyesatkan, karena angka itu tidak ditanya. Sekarang:
+            # pertanyaan skincare dijawab dokumen RAG; sisanya dibatasi jujur,
+            # tanpa angka DB dan tanpa dokumen acak.
+            if rag_docs and any(sk in msg_lower for sk in SafetyLayer.SKIN_KEYWORDS):
+                parts = []
+                for d in rag_docs[:2]:
+                    parts.append(f"**{d.get('title')}**\n{d.get('content')}")
+                return "\n\n".join(parts)
             return (
-                f"Di database saat ini ada {total_users} pengguna, {total_scans} pemindaian, "
-                f"dan {total_prods} produk di katalog. Kalau mau detailnya, tanya aja — misalnya "
-                "berapa total pengguna, scan terbaru dari siapa, atau produk apa saja di katalog."
+                "Itu di luar yang bisa aku bantu — aku bisa jawab soal data aplikasi ini "
+                "(pengguna, scan, produk, tren kulit, log aktivitas), soal pengertian "
+                "istilah dan fitur di aplikasi, dan soal kesehatan kulit. Coba tanya "
+                "misalnya 'berapa total pengguna' atau 'apa itu akun yang ditangguhkan'."
             )
 
         # ─────────────────────────────────────────────────────
         # CUSTOMER LOCAL RESPONSES (Scoped to User's Own Account & Skin Health)
         # ─────────────────────────────────────────────────────
+        # 0b. Definisi / pengertian konsep aplikasi (glosarium) — sama seperti
+        # admin: pertanyaan "apa itu ...?" soal aplikasi dijawab pengertiannya,
+        # bukan data orang lain dan bukan dokumen acak. Ditempatkan SEBELUM
+        # safety check (bukan sesudahnya) karena glosarium hanya berisi
+        # pengetahuan umum aplikasi — tidak ada data pengguna di dalamnya —
+        # jadi "apa itu database aplikasi" tidak boleh ditolak sebagai akses
+        # tak sah. Ditempatkan sebelum cabang identitas/data supaya tidak
+        # direbut cabang lain.
+        _def_answer = _glossary_answer(msg_lower)
+        if _def_answer is not None:
+            return _def_answer
+
         # 1. Check if user is asking for unauthorized project-wide database or other accounts
         is_allowed_personal_db = any(ak in msg_lower for ak in [
             "siapa saya", "siapa dia", "berapa kali", "hasil cek", "rata-rata", "rata rata", "rerata",
@@ -2143,7 +2352,10 @@ class AIOrchestrator:
             return SafetyLayer.DATABASE_RESTRICTION_REJECTION
 
         # 7. Pure facial skin health / RAG inquiry
-        if rag_docs:
+        # (2026-11-13) Dokumen RAG hanya dijawab kalau pertanyaannya memang
+        # soal kulit — kalau tidak, jatuh ke cabang 8 (batasan domain), bukan
+        # dokumen acak yang kebetulan cocok satu kata.
+        if rag_docs and any(sk in msg_lower for sk in SafetyLayer.SKIN_KEYWORDS):
             parts = []
             for d in rag_docs[:2]:
                 parts.append(f"**{d.get('title')}**\n{d.get('content')}")
