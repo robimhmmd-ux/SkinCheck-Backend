@@ -1273,8 +1273,8 @@ class AIOrchestrator:
                 if admin_u:
                     joined = admin_u.created_at.strftime("%d %B %Y") if admin_u.created_at else "-"
                     return (
-                        f"Kamu {admin_u.name}, admin Laomera (ID pengguna #{admin_u.id}, "
-                        f"email {admin_u.email}). Akunmu terdaftar sejak {joined}."
+                        f"Kamu {admin_u.name}, admin Laomera "
+                        f"(email {admin_u.email}). Akunmu terdaftar sejak {joined}."
                     )
                 return "Kamu login sebagai admin Laomera."
             if any(w in msg_lower for w in ["saya bisa apa", "bisa apa aja", "bisa apa saja", "apa saja yang bisa", "apa yang bisa", "kemampuan", "ngapain aja", "bisa bantu apa"]):
@@ -1460,8 +1460,80 @@ class AIOrchestrator:
                         parts.append(f"Sebelumnya: {others}.")
                 return " ".join(parts)
 
+            # 4b. Status akun & verifikasi — daftar akun per status.
+            # (2026-11-13) "apakah ada akun yang belum verifikasi kode OTP?"
+            # jatuh ke ringkasan default karena kata "akun"/"verifikasi"
+            # tidak memicu cabang mana pun (cabang pengguna hanya kenal
+            # "user"/"pengguna"/"customer"/"member"). Cabang ini menjawab
+            # spesifik per status, dari data User + ActivityLog yang asli.
+            if any(w in msg_lower for w in ["verifikasi", "verif", "pending", "otp", "ditangguhkan", "suspended", "biodata", "akun admin", "siapa saja admin", "daftar admin", "adminnya"]):
+                # (a) Daftar admin — hanya kalau pertanyaannya memang soal
+                # daftar admin (bukan soal status akun admin).
+                if "admin" in msg_lower and any(w in msg_lower for w in ["siapa", "daftar", "saja", "akun admin"]) and not any(w in msg_lower for w in ["belum", "verifikasi", "ditangguhkan", "suspended", "pending", "otp"]):
+                    admins = db.query(User).filter(User.role == "admin").order_by(User.name).all()
+                    if not admins:
+                        return "Tidak ada akun admin di website ini."
+                    names = ", ".join(f"{a.name} ({a.email})" for a in admins)
+                    return f"Admin website ini ada {len(admins)}: {names}."
+                # (b) Akun ditangguhkan.
+                if any(w in msg_lower for w in ["ditangguhkan", "suspended", "tangguh"]):
+                    susp = db.query(User).filter(User.status == "suspended").order_by(User.name).all()
+                    if not susp:
+                        return "Tidak ada akun yang ditangguhkan saat ini."
+                    names = ", ".join(f"{u.name} ({u.email})" for u in susp)
+                    return f"Ada {len(susp)} akun yang ditangguhkan: {names}."
+                # (c) Akun belum verifikasi (pending = OTP, awaiting_biodata = biodata).
+                if any(w in msg_lower for w in ["belum", "pending", "otp"]) or "biodata" in msg_lower:
+                    q = db.query(User).filter(User.status.in_(["pending", "awaiting_biodata"])).order_by(User.created_at.desc())
+                    biodata_only = "biodata" in msg_lower and "belum" in msg_lower
+                    if biodata_only:
+                        q = q.filter(User.status == "awaiting_biodata")
+                    unver = q.all()
+                    if not unver:
+                        if biodata_only:
+                            return "Tidak ada akun yang menunggu biodata saat ini."
+                        return "Tidak ada akun yang belum verifikasi saat ini — semua akun sudah melewati OTP."
+                    parts = []
+                    for u in unver:
+                        if u.status == "pending":
+                            parts.append(f"{u.name} ({u.email}) masih menunggu verifikasi kode OTP")
+                        else:
+                            parts.append(f"{u.name} ({u.email}) sudah verifikasi OTP, belum melengkapi biodata")
+                    return f"Ada {len(unver)} akun yang belum verifikasi: " + "; ".join(parts) + "."
+                # (d) Akun yang baru saja terverifikasi (dari log biodata).
+                if any(w in msg_lower for w in ["sudah", "baru", "terverifikasi"]):
+                    logs = (
+                        db.query(ActivityLog, User.name, User.email)
+                        .join(User, ActivityLog.user_id == User.id)
+                        .filter(ActivityLog.activity.like("%verifikasi akun selesai%"))
+                        .order_by(ActivityLog.created_at.desc())
+                        .limit(5)
+                        .all()
+                    )
+                    if not logs:
+                        n_active = db.query(User).filter(User.status == "active").count()
+                        return (
+                            "Tidak ada catatan akun yang baru saja terverifikasi di log aktivitas. "
+                            f"Total ada {n_active} akun aktif saat ini."
+                        )
+                    names = ", ".join(
+                        f"{nm} ({em}, {lg.created_at.strftime('%d/%m %H:%M') if lg.created_at else '-'})"
+                        for lg, nm, em in logs
+                    )
+                    return f"Akun yang baru saja terverifikasi: {names}."
+                # (e) Ringkasan status akun (pertanyaan status lain).
+                n_active = db.query(User).filter(User.status == "active").count()
+                n_pend = db.query(User).filter(User.status == "pending").count()
+                n_bio = db.query(User).filter(User.status == "awaiting_biodata").count()
+                n_susp = db.query(User).filter(User.status == "suspended").count()
+                n_inact = db.query(User).filter(User.status == "inactive").count()
+                return (
+                    f"Status akun saat ini: {n_active} aktif, {n_pend} menunggu verifikasi OTP, "
+                    f"{n_bio} menunggu biodata, {n_susp} ditangguhkan, dan {n_inact} nonaktif."
+                )
+
             # 5. Users snapshot
-            if any(w in msg_lower for w in ["user", "pengguna", "customer", "member"]):
+            if any(w in msg_lower for w in ["user", "pengguna", "customer", "member", "akun"]):
                 total_users = db.query(User).count()
                 customers = db.query(User).filter(User.role == "customer").count()
                 admins = db.query(User).filter(User.role == "admin").count()
@@ -1544,7 +1616,9 @@ class AIOrchestrator:
             "siapa saya", "siapa dia", "berapa kali", "hasil cek", "rata-rata", "rata rata", "rerata",
             "link shopee", "produk shopee", "shopee yang ada di database", "shopee di database",
             "profil saya", "akun saya", "data saya", "riwayat scan", "grafik", "dashboard", "persen",
-            "jerawat saya", "minyak saya", "kulit saya", "skor saya"
+            "jerawat saya", "minyak saya", "kulit saya", "skor saya",
+            "kapan terakhir", "terakhir saya scan", "scan terakhir", "status verifikasi",
+            "terverifikasi", "status akun",
         ])
         if not is_allowed_personal_db:
             for pattern in SafetyLayer.UNAUTHORIZED_DB_PATTERNS:
@@ -1577,6 +1651,27 @@ class AIOrchestrator:
                 # Specific check if asking about email
                 if any(w in msg_lower for w in ["email saya", "alamat email"]):
                     return f"Akunmu terdaftar dengan alamat email **{u.email}** atas nama **{u.name}**, dan status akunmu saat ini aktif."
+
+                # (2026-11-13) "apakah akun saya sudah terverifikasi" sebelumnya
+                # dijawab profil generik tanpa menyebut status verifikasi.
+                if any(w in msg_lower for w in ["verifikasi", "verif", "terverifikasi"]):
+                    verif_answers = {
+                        "active": "Ya, akunmu sudah terverifikasi dan aktif — semua fitur sudah bisa kamu pakai.",
+                        "pending": "Belum — akunmu masih menunggu verifikasi kode OTP WhatsApp. Cek pop-up verifikasi di dashboard untuk melanjutkan.",
+                        "awaiting_biodata": "Kode OTP kamu sudah terverifikasi, tinggal lengkapi biodata supaya akunmu jadi aktif.",
+                        "suspended": "Akunmu sedang ditangguhkan, jadi fitur-fiturnya belum bisa dipakai.",
+                        "inactive": "Akunmu belum aktif — selesaikan verifikasi OTP dan biodata dulu.",
+                    }
+                    return verif_answers.get(u.status, f"Status akunmu saat ini: {u.status}.")
+                if "status akun" in msg_lower or "status saya" in msg_lower:
+                    status_labels = {
+                        "active": "aktif",
+                        "pending": "menunggu verifikasi OTP",
+                        "awaiting_biodata": "menunggu biodata",
+                        "suspended": "ditangguhkan",
+                        "inactive": "belum aktif",
+                    }
+                    return f"Akunmu saat ini berstatus {status_labels.get(u.status, u.status)}."
 
                 u_scans = db.query(SkinScan).filter(SkinScan.user_id == user_id, SkinScan.status == "completed").all()
                 total_scans = len(u_scans)
@@ -1612,7 +1707,21 @@ class AIOrchestrator:
                 return "Kamu saat ini belum memiliki riwayat pemindaian wajah di SkinCheck. Luvenna siap membantumu melakukan scan wajah pertamamu kapan pun kamu siap!"
 
         # 4. Customer asking about Latest Scan ("scan terakhir", "hasil scan terakhir", "kondisi terakhir")
-        if user_id and any(w in msg_lower for w in ["scan terakhir", "hasil scan terakhir", "analisis terakhir", "kondisi terakhir", "cek terakhir"]):
+        # (2026-11-13) "kapan terakhir saya scan" sebelumnya tidak memicu
+        # cabang ini (kata "terakhir ... scan" terbalik) dan jatuh ke dokumen
+        # RAG yang salah ("Kapan harus ke dokter kulit?").
+        if user_id and any(w in msg_lower for w in ["scan terakhir", "hasil scan terakhir", "analisis terakhir", "kondisi terakhir", "cek terakhir", "terakhir saya scan", "kapan terakhir", "terakhir scan"]):
+            # (a) "kapan terakhir saya scan" — jawab tanggalnya saja, to-the-point.
+            if "kapan" in msg_lower:
+                latest = db.query(SkinScan).filter(SkinScan.user_id == user_id).order_by(desc(SkinScan.created_at)).first()
+                if not latest:
+                    return "Kamu belum pernah scan."
+                when = latest.created_at.strftime("%d %B %Y, %H:%M WIB") if latest.created_at else "-"
+                ar = db.query(AnalysisResult).filter(AnalysisResult.skin_scan_id == latest.id).first()
+                if ar and ar.overall_score is not None:
+                    return f"Terakhir kamu scan tanggal {when}, skor kesehatan kulitmu {int(ar.overall_score)}/100."
+                st = "selesai dianalisis" if latest.status == "completed" else ("gagal dianalisis" if latest.status == "failed" else latest.status)
+                return f"Terakhir kamu scan tanggal {when} ({st})."
             u_scans = db.query(SkinScan).filter(SkinScan.user_id == user_id).order_by(desc(SkinScan.created_at)).all()
             for u_scan in u_scans:
                 ar = db.query(AnalysisResult).filter(AnalysisResult.skin_scan_id == u_scan.id).first()
@@ -1791,6 +1900,14 @@ class AIOrchestrator:
                         f"{shopee_text}"
                     )
                 return "\n\n".join(parts)
+
+        # 6b. Customer bertanya soal akun/scan pengguna lain — tolak (privasi).
+        # (2026-11-13) "akun mana yang sering scan?" dari customer sebelumnya
+        # jatuh ke dokumen RAG (jawaban skincare acak) — bukan data orang
+        # lain, tapi tetap salah: pertanyaan soal akun lain harus ditolak
+        # dengan jelas, bukan dijawab dokumen yang tidak nyambung.
+        if any(w in msg_lower for w in ["akun mana", "siapa yang paling", "siapa yang sering", "siapa saja yang", "pengguna lain", "akun lain", "customer lain"]):
+            return SafetyLayer.DATABASE_RESTRICTION_REJECTION
 
         # 7. Pure facial skin health / RAG inquiry
         if rag_docs:
