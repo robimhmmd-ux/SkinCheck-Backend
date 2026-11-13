@@ -1138,6 +1138,87 @@ def _has_word(msg_lower: str, word: str) -> bool:
     return bool(re.search(pat, msg_lower))
 
 
+# ── Daftar LENGKAP ("sebutin seluruh pengguna") ──
+# (2026-11-13) Cabang snapshot hanya menampilkan 5 terbaru; pertanyaan
+# yang minta SELURUH daftar harus mengembalikan semua baris dari DB
+# (cap 50, dengan catatan jujur kalau melebihi itu). Bukan hardcode:
+# semua nama/angka dihitung dari query saat pertanyaan masuk.
+_FULL_LIST_CAP = 50
+_FULL_LIST_WORDS = ["seluruh", "semua", "sebutin", "sebutkan", "sebut", "list", "siapa saja", "siapa aja"]
+_FULL_LIST_BLOCKERS = [
+    # Bukan minta daftar: "terakhir daftar" = baru mendaftar; "paling
+    # banyak/sering" = top-N; "skor rata-rata semua pengguna" = agregat;
+    # "belum pernah scan/chat" = intent spesifik yang sudah ada.
+    "terakhir", "paling", "sering", "skor", "rata-rata", "rerata", "tren",
+    "belum pernah scan", "belum pernah chat", "terakhir chat",
+    "terakhir nanya", "terakhir bertanya", "terakhir ngobrol",
+    "baru daftar", "baru bergabung",
+]
+
+
+def _wants_full_list(msg_lower: str) -> bool:
+    """True kalau pertanyaan minta DAFTAR LENGKAP (bukan jumlah/terbaru)."""
+    if any(w in msg_lower for w in _FULL_LIST_BLOCKERS):
+        return False
+    return any(w in msg_lower for w in _FULL_LIST_WORDS)
+
+
+def _all_users_answer(db: Session) -> str:
+    users = db.query(User).order_by(User.created_at.desc()).all()
+    if not users:
+        return "Belum ada pengguna yang terdaftar."
+    shown = users[:_FULL_LIST_CAP]
+    lines = [f"**Seluruh Pengguna Website ({len(users)} orang):**"]
+    for u in shown:
+        lines.append(f"• {u.name} ({u.email}) — {u.role}, {u.status}")
+    if len(users) > len(shown):
+        lines.append(f"Menampilkan {len(shown)} dari total {len(users)} pengguna.")
+    return "\n".join(lines)
+
+
+def _all_products_answer(db: Session) -> str:
+    prods = db.query(Product).filter(Product.status == "active").order_by(Product.created_at.desc()).all()
+    if not prods:
+        return "Belum ada produk aktif di katalog."
+    shown = prods[:_FULL_LIST_CAP]
+    lines = [f"**Seluruh Produk Aktif ({len(prods)} item):**"]
+    for p in shown:
+        shopee_info = f" [Beli di Shopee]({p.shopee_link})" if p.shopee_link else " (Link Shopee belum ada)"
+        lines.append(f"• {p.brand} {p.name} ({category_label(p.category)}){shopee_info}")
+    if len(prods) > len(shown):
+        lines.append(f"Menampilkan {len(shown)} dari total {len(prods)} produk.")
+    return "\n".join(lines)
+
+
+def _all_scans_answer(db: Session, msg_lower: str, user_id=None) -> str:
+    q = (
+        db.query(SkinScan, User.name)
+        .join(User, SkinScan.user_id == User.id)
+        .order_by(SkinScan.created_at.desc())
+    )
+    if user_id is not None:
+        q = q.filter(SkinScan.user_id == user_id)
+    label = "Seluruh Scan"
+    if "gagal" in msg_lower:
+        q = q.filter(SkinScan.status == "failed")
+        label = "Seluruh Scan yang Gagal"
+    elif any(w in msg_lower for w in ["berhasil", "selesai", "completed", "sukses"]):
+        q = q.filter(SkinScan.status == "completed")
+        label = "Seluruh Scan yang Berhasil"
+    total = q.count()
+    if total == 0:
+        return "Tidak ada scan yang cocok."
+    rows = q.limit(_FULL_LIST_CAP).all()
+    lines = [f"**{label} ({total} scan):**"]
+    for s, nm in rows:
+        when = s.created_at.strftime("%d/%m %H:%M") if s.created_at else "-"
+        st = "selesai dianalisis" if s.status == "completed" else ("gagal dianalisis" if s.status == "failed" else s.status)
+        lines.append(f"• {nm} — {when}, {st}")
+    if total > len(rows):
+        lines.append(f"Menampilkan {len(rows)} dari total {total} scan.")
+    return "\n".join(lines)
+
+
 def _retrieve_for_question(db: Session, user_id, role: str, msg_lower: str):
     """Ambil data dari DB berdasarkan entitas di pertanyaan, sesuai scope
     peran. Return jawaban (str) atau None kalau tidak ada entitas/data
@@ -1270,8 +1351,15 @@ def _retrieve_for_question(db: Session, user_id, role: str, msg_lower: str):
             )
 
     # Scan — admin: seluruh scan; customer: scan sendiri saja.
+    # (2026-11-13) Maksud "seluruh" menampilkan daftar lengkap, bukan
+    # cuma ringkasan jumlah.
     if any(_has_word(msg_lower, w) for w in ["scan", "pemindaian", "pemeriksaan"]):
-        if is_admin:
+        if _wants_full_list(msg_lower):
+            if is_admin:
+                parts.append(_all_scans_answer(db, msg_lower))
+            else:
+                parts.append(_all_scans_answer(db, msg_lower, user_id=user_id))
+        elif is_admin:
             total = db.query(SkinScan).count()
             completed = db.query(SkinScan).filter(SkinScan.status == "completed").count()
             failed = db.query(SkinScan).filter(SkinScan.status == "failed").count()
@@ -1285,12 +1373,15 @@ def _retrieve_for_question(db: Session, user_id, role: str, msg_lower: str):
 
     # Produk — info katalog umum (admin + customer).
     if any(_has_word(msg_lower, w) for w in ["produk", "katalog", "barang"]):
-        filled, empty, total = _product_category_summary(db)
-        if filled:
-            per_cat = ", ".join(f"{label} ({n})" for label, n, _ in filled)
-            parts.append(f"Katalog punya {total} produk aktif dalam {len(filled)} kategori: {per_cat}.")
+        if _wants_full_list(msg_lower):
+            parts.append(_all_products_answer(db))
         else:
-            parts.append("Katalog masih kosong — belum ada produk aktif.")
+            filled, empty, total = _product_category_summary(db)
+            if filled:
+                per_cat = ", ".join(f"{label} ({n})" for label, n, _ in filled)
+                parts.append(f"Katalog punya {total} produk aktif dalam {len(filled)} kategori: {per_cat}.")
+            else:
+                parts.append("Katalog masih kosong — belum ada produk aktif.")
 
     # Log / aktivitas — admin: semua; customer: aktivitas sendiri saja.
     if any(_has_word(msg_lower, w) for w in ["log", "aktivitas"]):
@@ -1389,12 +1480,18 @@ def _retrieve_for_question(db: Session, user_id, role: str, msg_lower: str):
     if any(_has_word(msg_lower, w) for w in ["pengguna", "user", "akun", "member", "customer"]):
         if not is_admin:
             return _privacy()
-        total = db.query(User).count()
-        customers = db.query(User).filter(User.role == "customer").count()
-        admins = db.query(User).filter(User.role == "admin").count()
-        newest = db.query(User).order_by(User.created_at.desc()).limit(5).all()
-        names = ", ".join(f"{u.name} ({u.email})" for u in newest)
-        parts.append(f"Total ada {total} pengguna (customer: {customers}, admin: {admins}). {len(newest)} terbaru: {names}.")
+        # Maksud "seluruh" → daftar lengkap, bukan 5 terbaru. Hanya kalau
+        # belum ada entitas lain yang menjawab (users dicek terakhir supaya
+        # tidak merebut pertanyaan lain, mis. "skor rata-rata semua pengguna").
+        if _wants_full_list(msg_lower) and not parts:
+            parts.append(_all_users_answer(db))
+        else:
+            total = db.query(User).count()
+            customers = db.query(User).filter(User.role == "customer").count()
+            admins = db.query(User).filter(User.role == "admin").count()
+            newest = db.query(User).order_by(User.created_at.desc()).limit(5).all()
+            names = ", ".join(f"{u.name} ({u.email})" for u in newest)
+            parts.append(f"Total ada {total} pengguna (customer: {customers}, admin: {admins}). {len(newest)} terbaru: {names}.")
 
     if not parts:
         return None
@@ -2214,7 +2311,7 @@ class AIOrchestrator:
             # pernah dipakai. Sekarang semuanya dari ChatMessage yang sebenarnya,
             # supaya admin bisa melihat customer kebingungan di fitur apa dan
             # pertanyaan apa yang paling sering muncul (bahan update).
-            if any(w in msg_lower for w in ["chat", "obrolan", "keluh", "nanya", "minta", "tren pertanyaan", "identifikasi chat", "pertanyaan customer", "pertanyaan user", "riwayat chat", "baca chat", "sering nanya", "sering ditanya"]) and not any(w in msg_lower for w in ["terakhir chat", "terakhir nanya", "terakhir bertanya", "terakhir ngobrol", "belum pernah chat"]):
+            if any(_has_word(msg_lower, w) for w in ["chat", "obrolan", "keluh", "nanya", "minta", "tren pertanyaan", "identifikasi chat", "pertanyaan customer", "pertanyaan user", "riwayat chat", "baca chat", "sering nanya", "sering ditanya"]) and not any(w in msg_lower for w in ["terakhir chat", "terakhir nanya", "terakhir bertanya", "terakhir ngobrol", "belum pernah chat"]):
                 # (a) Baca riwayat chat satu customer — nama disebut di pertanyaan.
                 if any(w in msg_lower for w in ["baca chat", "riwayat chat", "chatnya", "obrolan"]):
                     target = find_user_by_name(db, msg_lower, role="customer")
@@ -2310,6 +2407,12 @@ class AIOrchestrator:
             # sini dulu, dan pertanyaan yang spesifik dijawab to-the-point
             # (1-2 kalimat), bukan laporan panjang.
             if any(w in msg_lower for w in ["scan", "pemindaian", "foto"]) and "belum pernah scan" not in msg_lower and not any(w in msg_lower for w in ["kuota", "maintenance", "pengaturan", "setting", "konfigurasi"]):
+                # (a0) Daftar LENGKAP scan — "sebutin seluruh scan" minta
+                # semua baris, bukan 3 terbaru. Kalau nama disebut, daftar
+                # scan orang itu saja. (2026-11-13)
+                if _wants_full_list(msg_lower):
+                    named = find_user_by_name(db, msg_lower)
+                    return _all_scans_answer(db, msg_lower, user_id=named.id if named else None)
                 # (a) Per akun — nama disebut ("berapa kali Budi scan",
                 # "Budi sering scan?"). Dicek dulu supaya pertanyaan tentang
                 # satu orang tidak dijawab dengan top 3 seluruh pengguna.
@@ -2538,6 +2641,10 @@ class AIOrchestrator:
 
             # 5. Users snapshot
             if any(w in msg_lower for w in ["user", "pengguna", "customer", "member", "akun"]) and not any(w in msg_lower for w in ["terakhir daftar", "terakhir terdaftar", "baru daftar", "paling baru", "terakhir bergabung", "belum pernah scan", "belum pernah chat", "terakhir chat", "terakhir nanya", "terakhir bertanya", "terakhir ngobrol", "skor", "rata-rata", "rerata", "tren"]):
+                # Daftar LENGKAP — "sebutin seluruh pengguna" minta semua
+                # nama, bukan 5 terbaru. (2026-11-13)
+                if _wants_full_list(msg_lower):
+                    return _all_users_answer(db)
                 total_users = db.query(User).count()
                 customers = db.query(User).filter(User.role == "customer").count()
                 admins = db.query(User).filter(User.role == "admin").count()
@@ -2569,6 +2676,10 @@ class AIOrchestrator:
                         return f"Semua produk aktif sudah punya tautan {market}."
                     names = ", ".join(f"{p.brand} {p.name} ({category_label(p.category)})" for p in missing)
                     return f"Produk yang belum ada tautan {market} ada {len(missing)}: {names}."
+                # Daftar LENGKAP produk aktif — "sebutin seluruh produk".
+                # (2026-11-13)
+                if _wants_full_list(msg_lower):
+                    return _all_products_answer(db)
                 total_prods = db.query(Product).count()
                 with_shopee = db.query(Product).filter(Product.shopee_link.isnot(None), Product.shopee_link != "").count()
                 prods = db.query(Product).limit(8).all()
@@ -2972,6 +3083,11 @@ class AIOrchestrator:
         # 6. Customer seeking product recommendation
         is_seeking = self._is_seeking_product(message)
         if is_seeking and not any(w in msg_lower for w in ["paling baru", "terbaru", "baru ditambahkan", "terakhir ditambahkan"]):
+            # Daftar LENGKAP produk — "sebutin seluruh produk" (info katalog
+            # umum, boleh untuk customer; bukan rekomendasi yang dibatasi 3).
+            # (2026-11-13)
+            if _wants_full_list(msg_lower):
+                return _all_products_answer(db)
             all_products = db.query(Product).filter(Product.status == "active").all()
             matched = []
 
