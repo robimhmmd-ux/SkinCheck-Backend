@@ -768,6 +768,11 @@ CUSTOMER_SYSTEM_PROMPT = """Nama kamu adalah Luvenna (Ven), asisten pribadi untu
 7. BATASAN MEDIS & DOMAIN:
    - Fokus pada perawatan kulit wajah non-medis. Jika di luar domain atau membutuhkan tindakan medis darurat/obat keras, tolak secara ramah dan sarankan dokter kulit spesialis.
 
+8. JAWAB DULU, TAWARKAN SARAN SETELAHNYA:
+   - Kalau pengguna bertanya tentang kondisi kulitnya (skor, kondisi dominan, hasil scan), jawab dulu pertanyaannya secara to-the-point dari data scan-nya.
+   - Setelah menjawab, tawarkan saran dengan kalimat seperti "Mau aku saranin perawatannya?" — JANGAN langsung memberikan sarannya di jawaban yang sama.
+   - Berikan saran perawatan atau rekomendasi produk HANYA kalau pengguna memintanya secara eksplisit (misal "kasih saran", "rekomendasi produk", "cara mengatasi").
+
 DATA DATABASE PRIBADI PENGGUNA (HANYA UNTUK USER INI):
 {user_context}
 
@@ -1368,6 +1373,94 @@ class AIOrchestrator:
         ]
         return any(ind in msg_lower for ind in product_indicators)
 
+    def _wants_advice(self, msg_lower: str) -> bool:
+        """Apakah user secara eksplisit meminta saran perawatan?
+        (2026-11-13) Saran HANYA boleh muncul kalau diminta eksplisit —
+        pertanyaan faktual soal data sendiri tidak boleh dijawab dengan
+        saran, cukup tawaran saran sesudah menjawab."""
+        return any(w in msg_lower for w in [
+            "saran", "rekomendasi", "cara mengatasi", "cara ngatasin",
+            "gimana ngatasin", "ngatasin", "mengatasi", "atasi",
+            "pakai apa", "pake apa", "rutinitas", "hilangkan", "obati",
+            "gimana cara", "bagaimana cara", "cara merawat",
+            "gimana merawat", "bagaimana merawat", "tips",
+        ])
+
+    def _condition_scores(self, ar) -> dict:
+        """5 skor kondisi + overall dari AnalysisResult. Fallback dark
+        spots -> hyperpigmentation dan wrinkles -> texture, sama seperti
+        cabang 4/5 dan tren platform."""
+        return {
+            "acne": int(ar.acne_score or 0),
+            "dry": int(ar.dry_skin_score or 0),
+            "oily": int(ar.oily_skin_score or 0),
+            "dark_spots": int(ar.dark_spots_score if ar.dark_spots_score is not None and ar.dark_spots_score > 0 else (ar.hyperpigmentation_score or 0)),
+            "wrinkles": int(ar.wrinkles_score if ar.wrinkles_score is not None and ar.wrinkles_score > 0 else (ar.texture_score or 0)),
+            "overall": int(ar.overall_score or 0),
+        }
+
+    def _dominant_condition(self, scores: dict):
+        """Kondisi dengan skor tertinggi (urutan SCORE_KEYS, strict >) —
+        logika yang sama dengan 'Fokus Utama' di halaman Riwayat."""
+        order = [
+            ("acne", "Jerawat", "berjerawat"),
+            ("dry", "Kulit kering", "kering"),
+            ("oily", "Kulit berminyak", "berminyak"),
+            ("dark_spots", "Dark spots", "punya flek/noda hitam"),
+            ("wrinkles", "Kerutan", "punya kerutan"),
+        ]
+        best = None
+        for key, label, phrase in order:
+            v = scores.get(key, 0)
+            if best is None or v > best[3]:
+                best = (key, label, phrase, v)
+        return best  # (key, label, phrase, value)
+
+    def _condition_tip(self, key: str, value: float) -> str:
+        """Saran perawatan per kondisi — dipakai cabang 4c dan 5.a-5.e.
+        Teksnya sama dengan yang sudah ada di 5.a-5.e."""
+        tips = {
+            "acne": (25,
+                     "Kondisi jerawatmu sudah sangat tenang dan terkontrol, pertahankan kebersihan kulit dan perlindungan tabir surya harian ya!",
+                     "Untuk meredakan peradangan, Luvenna sarankan fokus menjaga skin barrier dan gunakan pembersih lembut ber-pH seimbang atau bahan aktif seperti Salicylic Acid."),
+            "oily": (40,
+                     "Produksi minyak wajahmu tergolong seimbang dan normal!",
+                     "Kulitmu cenderung memproduksi sebum berlebih, sebaiknya pilih pelembap bertekstur gel yang ringan dan non-komedogenik agar pori-pori tetap leluasa bernapas."),
+            "dry": (25,
+                    "Kelembapan kulitmu terjaga dengan sangat baik dan terhidrasi prima!",
+                    "Kulitmu membutuhkan hidrasi ekstra, cobalah menambahkan toner hidrasi atau pelembap berbahan ceramide dan hyaluronic acid."),
+            "dark_spots": (25,
+                           "Noda hitam tergolong minim, terus lindungi kulitmu dengan sunscreen setiap pagi ya!",
+                           "Untuk membantu memudarkan tampilan noda hitam, kamu dapat menggunakan serum pencerah seperti Niacinamide atau Vitamin C dan disiplin mengaplikasikan tabir surya."),
+            "wrinkles": (25,
+                         "Kulit wajahmu terasa kenyal dan elastisitasnya terjaga prima!",
+                         "Untuk merawat kekenyalan kulit dan menyamarkan garis halus, pastikan kulit selalu terhidrasi optimal dan kamu bisa mulai mempertimbangkan perawatan anti-aging ringan."),
+        }
+        threshold, low, high = tips[key]
+        return low if value <= threshold else high
+
+    def _latest_analysis(self, db, user_id):
+        """Scan terbaru user yang sudah dianalisis + AnalysisResult-nya."""
+        scans = db.query(SkinScan).filter(SkinScan.user_id == user_id).order_by(desc(SkinScan.created_at)).all()
+        for s in scans:
+            ar = db.query(AnalysisResult).filter(AnalysisResult.skin_scan_id == s.id).first()
+            if ar and ar.overall_score is not None:
+                return s, ar
+        return None, None
+
+    def _is_own_skin_condition_question(self, msg_lower: str) -> bool:
+        """Pertanyaan customer soal kondisi/kecenderungan kulitnya sendiri
+        ('kulit saya cenderung ke apa', 'kondisi kulit saya gimana',
+        'fokus perawatan saya apa'). Bukan pertanyaan soal satu kondisi
+        spesifik (jerawat/minyak/dll) — itu diurus cabang 5."""
+        own = any(w in msg_lower for w in ["kulit saya", "kulitku", "kulit aku", "fokus perawatan"])
+        if not own:
+            return False
+        if any(w in msg_lower for w in ["jerawat", "acne", "minyak", "oily", "sebum", "kering", "dry", "dehidrasi", "hidrasi", "noda", "flek", "spots", "hiperpigmentasi", "kerutan", "garis halus", "wrinkles", "kerut"]):
+            return False
+        question_words = ["cenderung", "kondisi", "gimana", "bagaimana", "fokus", "dominan", "jenis", "ke arah", "lebih", "apa", "kenapa", "mengapa", "sehat", "skor", "berapa"]
+        return any(w in msg_lower for w in question_words) or self._wants_advice(msg_lower)
+
     def _generate_local_response(self, message: str, db: Session, rag_docs: List[dict], user_id: Optional[int] = None, role: str = "customer") -> str:
         """Intelligent local fallback matcher respecting role (Admin vs Customer) and to-the-point guidance."""
         msg_lower = message.lower()
@@ -1822,7 +1915,7 @@ class AIOrchestrator:
                 return (
                     f"Sejauh ini kamu sudah mempercayakan pemeriksaan kulit wajahmu sebanyak **{total_s} kali** di SkinCheck, "
                     f"dengan {completed_s} pemindaian yang telah selesai dianalisis. Seluruh riwayatnya tersimpan rapi untuk memantau progres kesehatan kulitmu dari waktu ke waktu. "
-                    f"Konsistensimu dalam memantau kondisi kulit wajah sangat baik!"
+                    f"Konsistensimu dalam memantau kondisi kulit wajah sangat baik! Mau aku saranin perawatannya?"
                 )
             else:
                 return "Kamu saat ini belum memiliki riwayat pemindaian wajah di SkinCheck. Luvenna siap membantumu melakukan scan wajah pertamamu kapan pun kamu siap!"
@@ -1868,9 +1961,41 @@ class AIOrchestrator:
                         f"Pada pemindaian wajah terakhirmu tanggal {l_time}, kondisi kulitmu {summary_tone} dengan skor kesehatan **{l_ov}/100**. "
                         f"Tingkat jerawat terpantau berada di angka **{l_ac}%**, kadar minyak alami di kisaran **{l_oi}%**, dan tingkat kekeringan kulit sebesar **{l_dr}%**. "
                         f"Sementara untuk noda hitam tercatat **{l_sp}%** serta garis halus di angka **{l_wr}%**. "
-                        f"Kondisi kulitmu secara umum menunjukkan tren yang positif, tetap pertahankan rutinitas perawatan kulitmu ya!"
+                        f"Mau aku saranin perawatannya?"
                     )
             return "Belum ada riwayat hasil pemindaian wajah yang tersimpan di sistem."
+
+        # 4c. Customer bertanya kondisi/kecenderungan kulitnya sendiri.
+        # (2026-11-13) "kulit saya cenderung ke apa" sebelumnya jatuh ke
+        # dokumen RAG generik ("Urutan Pemakaian Skincare Pagi" +
+        # "Hyaluronic Acid"), padahal dashboard jelas menunjukkan fokus
+        # utama dari scan terakhir user. Jawab dulu dari data scan user
+        # (kondisi dominan + skor), baru tawarkan saran — tanpa memberi
+        # sarannya di jawaban yang sama, kecuali user memang minta saran
+        # secara eksplisit.
+        if user_id and self._is_own_skin_condition_question(msg_lower):
+            latest_scan, ar = self._latest_analysis(db, user_id)
+            if not ar:
+                return "Kamu belum ada scan yang berhasil dianalisis, jadi aku belum bisa baca kondisi kulitmu — mau scan dulu?"
+            scores = self._condition_scores(ar)
+            dom_key, dom_label, dom_phrase, dom_value = self._dominant_condition(scores)
+            when = latest_scan.created_at.strftime("%d %B %Y") if latest_scan and latest_scan.created_at else "-"
+            if self._wants_advice(msg_lower):
+                return (
+                    f"Kulitmu cenderung {dom_phrase}. Di scan terakhir tanggal {when}, "
+                    f"skor {dom_label.lower()}mu {dom_value}%. "
+                    f"{self._condition_tip(dom_key, dom_value)}"
+                )
+            score_line = (
+                f"jerawat {scores['acne']}%, kulit kering {scores['dry']}%, "
+                f"kulit berminyak {scores['oily']}%, dark spots {scores['dark_spots']}%, "
+                f"dan kerutan {scores['wrinkles']}%"
+            )
+            return (
+                f"Kulitmu cenderung {dom_phrase}. Di scan terakhir tanggal {when}, "
+                f"skor kulitmu: {score_line}. "
+                f"Mau aku saranin perawatannya?"
+            )
 
         # 5. Customer asking for average scores / scan results / dashboard condition graphs
         has_avg_query = any(w in msg_lower for w in ["rerata", "rata-rata", "rata rata", "rata", "persen", "persentase", "grafik", "dashboard", "indeks", "skor saya", "hasil scan", "hasil cek"])
@@ -1920,49 +2045,49 @@ class AIOrchestrator:
 
                 # 5.a Specific: Acne / Jerawat
                 if is_acne_query and not (is_oily_query or is_dry_query or is_spots_query or is_wrinkles_query or is_overall_query):
-                    advice = "Kondisi jerawatmu sudah sangat tenang dan terkontrol, pertahankan kebersihan kulit dan perlindungan tabir surya harian ya!" if avg_ac <= 25 else "Untuk meredakan peradangan, Luvenna sarankan fokus menjaga skin barrier dan gunakan pembersih lembut ber-pH seimbang atau bahan aktif seperti Salicylic Acid."
+                    ending = self._condition_tip("acne", avg_ac) if self._wants_advice(msg_lower) else "Mau aku saranin perawatannya?"
                     return (
                         f"Tingkat jerawat pada kulit wajahmu saat ini rata-rata berada di angka **{avg_ac}%** ({ac_status}) dari riwayat {analyzed_cnt} kali pemeriksaan wajah. "
-                        f"{advice}"
+                        f"{ending}"
                     )
 
                 # 5.b Specific: Oily / Minyak
                 if is_oily_query and not (is_acne_query or is_dry_query or is_spots_query or is_wrinkles_query or is_overall_query):
-                    advice = "Produksi minyak wajahmu tergolong seimbang dan normal!" if avg_oi <= 40 else "Kulitmu cenderung memproduksi sebum berlebih, sebaiknya pilih pelembap bertekstur gel yang ringan dan non-komedogenik agar pori-pori tetap leluasa bernapas."
+                    ending = self._condition_tip("oily", avg_oi) if self._wants_advice(msg_lower) else "Mau aku saranin perawatannya?"
                     return (
                         f"Kadar minyak (sebum) alami wajahmu saat ini rata-rata berada di kisaran **{avg_oi}%** ({oi_status}) dari {analyzed_cnt} kali pemindaian wajah. "
-                        f"{advice}"
+                        f"{ending}"
                     )
 
                 # 5.c Specific: Dry / Kekeringan
                 if is_dry_query and not (is_acne_query or is_oily_query or is_spots_query or is_wrinkles_query or is_overall_query):
-                    advice = "Kelembapan kulitmu terjaga dengan sangat baik dan terhidrasi prima!" if avg_dr <= 25 else "Kulitmu membutuhkan hidrasi ekstra, cobalah menambahkan toner hidrasi atau pelembap berbahan ceramide dan hyaluronic acid."
+                    ending = self._condition_tip("dry", avg_dr) if self._wants_advice(msg_lower) else "Mau aku saranin perawatannya?"
                     return (
                         f"Tingkat kekeringan kulit wajahmu berada di rata-rata **{avg_dr}%** ({dr_status}) dari total {analyzed_cnt} kali scan wajah. "
-                        f"{advice}"
+                        f"{ending}"
                     )
 
                 # 5.d Specific: Dark Spots / Noda Hitam
-                if is_spots_query and not (is_acne_query or is_oily_query or is_dry_query or is_wrinkles_query or is_overall_query):
-                    advice = "Noda hitam tergolong minim, terus lindungi kulitmu dengan sunscreen setiap pagi ya!" if avg_sp <= 25 else "Untuk membantu memudarkan tampilan noda hitam, kamu dapat menggunakan serum pencerah seperti Niacinamide atau Vitamin C dan disiplin mengaplikasikan tabir surya."
+                if is_spots_query and not (is_acne_query or is_oily_query or is_dry_query or is_spots_query or is_wrinkles_query or is_overall_query):
+                    ending = self._condition_tip("dark_spots", avg_sp) if self._wants_advice(msg_lower) else "Mau aku saranin perawatannya?"
                     return (
                         f"Rata-rata noda hitam atau flek di kulit wajahmu berada di angka **{avg_sp}%** ({sp_status}) dari {analyzed_cnt} riwayat scan wajah. "
-                        f"{advice}"
+                        f"{ending}"
                     )
 
                 # 5.e Specific: Wrinkles / Garis Halus
                 if is_wrinkles_query and not (is_acne_query or is_oily_query or is_dry_query or is_spots_query or is_overall_query):
-                    advice = "Kulit wajahmu terasa kenyal dan elastisitasnya terjaga prima!" if avg_wr <= 25 else "Untuk merawat kekenyalan kulit dan menyamarkan garis halus, pastikan kulit selalu terhidrasi optimal dan kamu bisa mulai mempertimbangkan perawatan anti-aging ringan."
+                    ending = self._condition_tip("wrinkles", avg_wr) if self._wants_advice(msg_lower) else "Mau aku saranin perawatannya?"
                     return (
                         f"Rata-rata garis halus dan elastisitas kulitmu tercatat di angka **{avg_wr}%** ({wr_status}) dari {analyzed_cnt} kali pemeriksaan. "
-                        f"{advice}"
+                        f"{ending}"
                     )
 
                 # 5.f Specific: Overall Score
                 if is_overall_query and not (is_acne_query or is_oily_query or is_dry_query or is_spots_query or is_wrinkles_query):
                     return (
                         f"Indeks kesehatan kulit wajahmu secara keseluruhan berada di angka **{avg_ov}/100** ({ov_status}) dari akumulasi {analyzed_cnt} kali pemindaian wajah. "
-                        f"Perjalanan perawatan kulitmu sejauh ini sangat baik dan terarah, tetap konsisten merawatnya ya!"
+                        f"Mau aku saranin perawatannya?"
                     )
 
                 # 5.g Comprehensive Summary of all 5 conditions + Overall
@@ -2009,6 +2134,11 @@ class AIOrchestrator:
                 elif any(any(kw in msg_lower for kw in kw_list) and p.category.lower() == cat for cat, kw_list in keywords.items()):
                     if p not in matched:
                         matched.append(p)
+
+            if not matched and all_products:
+                # Permintaan produk eksplisit tapi tidak ada kata kunci yang
+                # cocok — tampilkan produk aktif saja, jangan jatuh ke RAG.
+                matched = all_products[:3]
 
             if matched:
                 parts = ["Berikut pilihan produk perawatan kulit wajah yang cocok dari katalog resmi:"]
