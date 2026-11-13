@@ -782,6 +782,39 @@ RIWAYAT PERCAKAPAN SEBELUMNYA:
 """
 
 
+def _format_prompt(template: str, **values) -> str:
+    """Ganti hanya placeholder yang dikenal ({user_context}, {chat_history},
+    ...). Kurung kurawal lain di teks aturan buatan admin (mis. contoh JSON)
+    dibiarkan apa adanya, supaya aturan yang ditulis admin tidak pernah
+    meledak di str.format()."""
+    out = template
+    for key, val in values.items():
+        out = out.replace("{" + key + "}", val)
+    return out
+
+
+def _get_system_prompt(db: Session, role: str) -> str:
+    """Aturan jawaban AI dari database (AI_SYSTEM_PROMPT_ADMIN/CUSTOMER).
+    Kosong / tidak ada -> pakai konstanta hardcode sebagai aturan bawaan."""
+    if role == "admin":
+        custom = (SystemSetting.get_value(db, "AI_SYSTEM_PROMPT_ADMIN", "") or "").strip()
+        return custom or ADMIN_SYSTEM_PROMPT
+    custom = (SystemSetting.get_value(db, "AI_SYSTEM_PROMPT_CUSTOMER", "") or "").strip()
+    return custom or CUSTOMER_SYSTEM_PROMPT
+
+
+def _render_system_prompt(db: Session, role: str, **values) -> str:
+    """Render template prompt. Kalau yang dipakai aturan bawaan, jalurnya
+    persis seperti sebelumnya (str.format) supaya prompt jalur Gemini tidak
+    berubah satu karakter pun; kalau aturan buatan admin, pakai
+    _format_prompt yang aman terhadap kurung kurawal."""
+    template = _get_system_prompt(db, role)
+    default = ADMIN_SYSTEM_PROMPT if role == "admin" else CUSTOMER_SYSTEM_PROMPT
+    if template is default:
+        return template.format(**values)
+    return _format_prompt(template, **values)
+
+
 # ─────────────────────────────────────────────────────────
 # 5. AI ORCHESTRATOR
 # ─────────────────────────────────────────────────────────
@@ -802,6 +835,63 @@ def _setting_int(db: Session, key: str, default: int) -> int:
         return int(SystemSetting.get_value(db, key, str(default)))
     except (TypeError, ValueError):
         return int(default)
+
+
+NVIDIA_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+NVIDIA_DEFAULT_MODEL = "meta/llama-3.1-8b-instruct"
+
+
+def _get_provider(db: Session) -> str:
+    """Provider AI aktif dari database. Nilai di luar gemini/nvidia
+    diperlakukan sebagai gemini (aman)."""
+    p = (SystemSetting.get_value(db, "AI_PROVIDER", "gemini") or "gemini").strip().lower()
+    return p if p in ("gemini", "nvidia") else "gemini"
+
+
+def _call_nvidia_chat(db: Session, prompt_input: str) -> Optional[str]:
+    """Satu panggilan chat ke endpoint OpenAI-compatible NVIDIA, dengan
+    prompt rakitan yang SAMA PERSIS seperti yang diterima Gemini (hasil
+    _build_prompt) supaya kedua provider tidak pernah menyimpang.
+    Mengembalikan teks jawaban, atau None bila apa pun gagal — pemanggil
+    wajib jatuh ke fallback lokal (chat tidak pernah 500 gara-gara ini)."""
+    nvidia_key = (SystemSetting.get_value(db, "NVIDIA_API_KEY", "") or "").strip()
+    if not nvidia_key:
+        return None
+    base_url = (
+        SystemSetting.get_value(db, "AI_NVIDIA_BASE_URL", NVIDIA_DEFAULT_BASE_URL)
+        or NVIDIA_DEFAULT_BASE_URL
+    ).strip().rstrip("/") or NVIDIA_DEFAULT_BASE_URL
+    model = (
+        SystemSetting.get_value(db, "AI_MODEL_NVIDIA", NVIDIA_DEFAULT_MODEL)
+        or NVIDIA_DEFAULT_MODEL
+    ).strip() or NVIDIA_DEFAULT_MODEL
+    temp_val = _setting_float(db, "AI_TEMPERATURE", 0.7)
+    max_tokens_val = min(_setting_int(db, "AI_MAX_TOKENS", 4096), 1024)
+    try:
+        import httpx
+
+        resp = httpx.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {nvidia_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt_input}],
+                "temperature": temp_val,
+                "max_tokens": max_tokens_val,
+            },
+            timeout=30.0,
+        )
+        if resp.status_code != 200:
+            logger.info(f"NVIDIA chat gagal (HTTP {resp.status_code}).")
+            return None
+        choices = resp.json().get("choices", [])
+        if not choices:
+            return None
+        content = (choices[0].get("message", {}).get("content") or "").strip()
+        return content or None
+    except Exception as e:  # noqa: BLE001
+        logger.info(f"NVIDIA chat error: {e}.")
+        return None
 
 
 class AIOrchestrator:
@@ -922,7 +1012,9 @@ class AIOrchestrator:
             admin_db_context = ContextBuilder.build_admin_database_context(
                 db, message, admin_user=admin_info
             )
-            system = ADMIN_SYSTEM_PROMPT.format(
+            system = _render_system_prompt(
+                db,
+                "admin",
                 admin_db_context=admin_db_context,
                 chat_history=history_str,
             )
@@ -942,7 +1034,9 @@ class AIOrchestrator:
         else:
             product_context = "Katalog produk tidak diperlukan untuk pertanyaan ini (pengguna tidak meminta rekomendasi produk)."
         rag_text = "\n".join([f"[{d.get('title', '')}]: {d.get('content', '')}" for d in rag_docs]) if rag_docs else "Tidak ada catatan khusus."
-        system = CUSTOMER_SYSTEM_PROMPT.format(
+        system = _render_system_prompt(
+            db,
+            "customer",
             user_context=user_context,
             chat_history=history_str,
             product_context=product_context,
@@ -999,6 +1093,19 @@ class AIOrchestrator:
             )
             self._save_history(user_id, message, local_resp, db)
             yield from self._chunk_sentences(local_resp)
+            return
+
+        # Provider NVIDIA: satu panggilan non-streaming, lalu hasilnya
+        # di-chunk seperti pola REST Gemini (tanpa SDK) di bawah.
+        if _get_provider(db) == "nvidia":
+            prompt_input = self._build_prompt(db, user_id, message, scan_id, role, history_str, rag_docs)
+            full = _call_nvidia_chat(db, prompt_input)
+            if not full:
+                logger.warning("NVIDIA stream tidak menjawab; fallback lokal.")
+                full = self._generate_local_response(message, db, rag_docs, user_id=user_id, role=role)
+            full = SafetyLayer.post_filter(full, is_pure_greeting=is_pure_greeting)
+            self._save_history(user_id, message, full, db)
+            yield from self._chunk_sentences(full)
             return
 
         model, _err = self._get_active_model(db)
@@ -1129,6 +1236,20 @@ class AIOrchestrator:
             local_resp = SafetyLayer.post_filter(local_resp, is_pure_greeting=is_pure_greeting)
             self._save_history(user_id, message, local_resp, db)
             return local_resp
+
+        # 4a. Provider NVIDIA: satu panggilan OpenAI-compatible dengan
+        # prompt rakitan yang sama seperti Gemini. Gagal apa pun (kunci
+        # kosong, endpoint mati, respons kosong) -> fallback lokal,
+        # tidak pernah 500.
+        if _get_provider(db) == "nvidia":
+            prompt_input = self._build_prompt(db, user_id, message, scan_id, role, chat_history_str, rag_docs)
+            ai_text = _call_nvidia_chat(db, prompt_input)
+            if not ai_text:
+                logger.warning("NVIDIA tidak menjawab; fallback lokal.")
+                ai_text = self._generate_local_response(message, db, rag_docs, user_id=user_id, role=role)
+            ai_text = SafetyLayer.post_filter(ai_text, is_pure_greeting=is_pure_greeting)
+            self._save_history(user_id, message, ai_text, db)
+            return ai_text
 
         # 4. Get Model
         model, err = self._get_active_model(db)

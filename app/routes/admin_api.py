@@ -1068,6 +1068,15 @@ SETTING_DEFS = [
     ("AI_MAX_TOKENS", "1024", False),
     ("AI_TEMPERATURE", "0.7", False),
     ("AI_SIMULATION_MODE", "off", False),
+    # Provider AI (2026-11-13): "gemini" (Google AI Studio) atau "nvidia"
+    # (endpoint OpenAI-compatible NVIDIA). AI_MODEL = model Gemini,
+    # AI_MODEL_NVIDIA = model NVIDIA. Aturan jawaban (system prompt) bisa
+    # diisi admin dari Konfigurasi; kosong = pakai aturan bawaan di kode.
+    ("AI_PROVIDER", "gemini", False),
+    ("AI_MODEL_NVIDIA", "meta/llama-3.1-8b-instruct", False),
+    ("AI_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1", False),
+    ("AI_SYSTEM_PROMPT_CUSTOMER", "", False),
+    ("AI_SYSTEM_PROMPT_ADMIN", "", False),
     ("SCAN_DAILY_QUOTA", "", False),  # kosong = tanpa batas (default aman)
     ("OTP_MODE", "", False),
     # REGISTRATION_OTP_MODE (2026-11-12): KUNCI INI WAJIB ADA — frontend tab
@@ -1081,6 +1090,7 @@ SETTING_DEFS = [
     ("MAINTENANCE_MODE", "off", False),
     ("VGG_THRESHOLD", "40", False),
     ("GEMINI_API_KEY", "", True),
+    ("NVIDIA_API_KEY", "", True),
     ("FONNTE_TOKEN", "", True),
     ("WA_API_TOKEN", "", True),
     ("MAIL_USERNAME", "", False),
@@ -1193,6 +1203,15 @@ async def admin_patch_settings(
             if not text:
                 return JSONResponse(status_code=400, content={"detail": "AI_MODEL tidak boleh kosong."})
             normalized[key] = text
+        elif key == "AI_MODEL_NVIDIA":
+            if not text:
+                return JSONResponse(status_code=400, content={"detail": "AI_MODEL_NVIDIA tidak boleh kosong."})
+            normalized[key] = text
+        elif key == "AI_PROVIDER":
+            low = text.lower()
+            if low not in ("gemini", "nvidia"):
+                return JSONResponse(status_code=400, content={"detail": "AI_PROVIDER harus 'gemini' atau 'nvidia'."})
+            normalized[key] = low
         elif key == "AI_TEMPERATURE":
             try:
                 temp = float(text)
@@ -1272,6 +1291,56 @@ async def admin_test_db(request: Request, db: Session = Depends(get_db)):
 async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
     admin = _require_admin(request)
     t0 = time.time()
+    # Mengetes provider yang AKTIF (AI_PROVIDER): nvidia -> endpoint
+    # OpenAI-compatible NVIDIA; gemini -> seperti sebelumnya.
+    provider = (SystemSetting.get_value(db, "AI_PROVIDER", "gemini") or "gemini").strip().lower()
+    if provider not in ("gemini", "nvidia"):
+        provider = "gemini"
+    if provider == "nvidia":
+        from app.services.ai_assistant_service import (
+            _call_nvidia_chat,
+            NVIDIA_DEFAULT_MODEL,
+        )
+
+        model_name = (SystemSetting.get_value(db, "AI_MODEL_NVIDIA", NVIDIA_DEFAULT_MODEL) or NVIDIA_DEFAULT_MODEL).strip() or NVIDIA_DEFAULT_MODEL
+        nvidia_key = (SystemSetting.get_value(db, "NVIDIA_API_KEY", "") or "").strip()
+        if not nvidia_key:
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "latency_ms": 0,
+                    "model": model_name,
+                    "provider": "nvidia",
+                    "detail": "NVIDIA_API_KEY belum disetel.",
+                }
+            )
+        sample = _call_nvidia_chat(
+            db, "Katakan 'Koneksi AI SkinCheck Berhasil' dalam satu kalimat."
+        )
+        latency_ms = round((time.time() - t0) * 1000, 1)
+        if not sample:
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "latency_ms": latency_ms,
+                    "model": model_name,
+                    "provider": "nvidia",
+                    "detail": "Gagal menghubungi NVIDIA (cek kunci, nama model, dan koneksi).",
+                }
+            )
+        _log_activity(
+            db, request, admin["id"], f"Admin menguji koneksi NVIDIA ({model_name}, {latency_ms} ms)"
+        )
+        return JSONResponse(
+            content={
+                "ok": True,
+                "latency_ms": latency_ms,
+                "model": model_name,
+                "provider": "nvidia",
+                "sample_output": sample[:500],
+                "detail": f"Koneksi NVIDIA ({model_name}) aktif ({latency_ms} ms).",
+            }
+        )
     api_key = (SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY) or "").strip()
     model_name = (SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
     if not api_key:
@@ -1280,6 +1349,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
                 "ok": False,
                 "latency_ms": 0,
                 "model": model_name,
+                "provider": "gemini",
                 "detail": "GEMINI_API_KEY belum disetel.",
             }
         )
@@ -1300,6 +1370,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
                 "ok": False,
                 "latency_ms": 0,
                 "model": model_name,
+                "provider": "gemini",
                 "detail": "SDK Google Gemini tidak tersedia di environment ini.",
             }
         )
@@ -1309,6 +1380,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
                 "ok": False,
                 "latency_ms": round((time.time() - t0) * 1000, 1),
                 "model": model_name,
+                "provider": "gemini",
                 "detail": f"Gagal menghubungi Gemini: {e}",
             }
         )
@@ -1320,6 +1392,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
             "ok": True,
             "latency_ms": latency_ms,
             "model": model_name,
+            "provider": "gemini",
             "sample_output": sample,
             "detail": f"Koneksi Gemini ({model_name}) aktif ({latency_ms} ms).",
         }
