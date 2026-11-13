@@ -116,7 +116,7 @@ Aplikasi ini dibangun dengan frontend Next.js dan backend FastAPI, dan di-hostin
 
 ### Marketplace
 
-Marketplace adalah katalog produk skincare di aplikasi — kamu bisa cari produk berdasarkan kategori (face wash, toner, serum, moisturizer, sunscreen, mask, eksfoliator) dan membelinya lewat tautan Shopee atau Tokopedia di tiap produk. Tidak ada keranjang atau pembayaran di dalam aplikasi.
+Marketplace adalah katalog produk skincare di aplikasi — kamu bisa cari produk berdasarkan kategori (Face Wash, Toner, Serum, Moisturizer, Sunscreen, Masker, Eksfoliator) dan membelinya lewat tautan Shopee atau Tokopedia di tiap produk. Tidak ada keranjang atau pembayaran di dalam aplikasi.
 
 ### Riwayat & Diagnosis
 
@@ -125,6 +125,10 @@ Riwayat & Diagnosis adalah arsip semua scan yang pernah kamu lakukan, lengkap de
 ### Produk
 
 Produk adalah item skincare di katalog aplikasi (marketplace) — masing-masing punya merek, nama, kategori, deskripsi, kandungan, dan tautan Shopee/Tokopedia. Admin mengelolanya di halaman Produk; rekomendasi produk ke customer hanya muncul kalau customer yang memintanya.
+
+### Kategori produk
+
+Ada 7 kategori produk di sistem: Face Wash, Toner, Serum, Moisturizer, Sunscreen, Masker, Eksfoliator. Kategori lama 'cleanser' dinormalisasi jadi face wash, jadi produk cleanser lama tetap masuk filter face wash. Admin memilih kategori saat menambah produk di halaman Produk.
 
 ### AI Copilot
 
@@ -173,6 +177,50 @@ Chatbot Laomera bisa memakai dua penyedia AI: Gemini (Google) atau NVIDIA (model
 ### Konfigurasi admin
 
 Konfigurasi adalah halaman pengaturan admin (menu Konfigurasi) dengan tiga tab: AI (provider Gemini/NVIDIA, kunci API, model, dan kuota), OTP (verifikasi WhatsApp dan aturan nomor), dan Admin (pengaturan akun admin). Perubahan di sana langsung berlaku tanpa restart.
+
+---
+
+## Pengaturan sistem
+
+Pengaturan di bawah ini tersimpan di tabel `system_settings` dan diatur admin di halaman Konfigurasi. Nilainya dibaca chatbot dari database — kecuali kunci rahasia (kunci API, token) yang nilainya tidak pernah disebut chatbot.
+
+### Kuota scan harian
+
+Kuota scan harian (SCAN_DAILY_QUOTA) membatasi berapa kali satu pengguna boleh scan dalam sehari. Kalau nilainya kosong berarti tanpa batas, dan akun tamu (Tester) tidak dihitung kuotanya. Admin mengaturnya di Konfigurasi → tab AI.
+
+### Maintenance mode
+
+Maintenance mode adalah saklar perawatan: kalau aktif, customer tidak bisa upload scan dan mendapat pesan layanan sedang perawatan — admin tetap bisa scan. Admin mengaturnya di Konfigurasi → tab AI.
+
+### Nomor WhatsApp boleh dipakai lebih dari satu akun
+
+Pengaturan ini (ALLOW_SAME_PHONE_NUMBER) menentukan apakah satu nomor WhatsApp boleh dipakai lebih dari satu akun. Kalau mati, daftar dengan nomor yang sudah dipakai akun lain ditolak; kalau hidup, boleh — kode OTP dikirim per nomor. Admin mengaturnya di Konfigurasi → tab OTP.
+
+### VGG threshold
+
+VGG threshold adalah ambang batas skor yang tersimpan di pengaturan — tapi saat ini tidak dipakai sebagai batas di kode backend yang live, jadi mengubahnya tidak mengubah hasil scan.
+
+### Mode registrasi OTP
+
+Mode registrasi OTP (REGISTRATION_OTP_MODE, default 'dual') tersimpan di pengaturan, tapi saat ini tidak dibaca backend yang live — alur registrasi yang live selalu memakai OTP WhatsApp lalu biodata.
+
+## Database
+
+### Tabel database
+
+Database aplikasi (TiDB) punya 8 tabel:
+• users — akun pengguna — nama, email, peran (customer/admin), status verifikasi
+• skin_scans — pemindaian wajah — siapa yang scan, jalur foto, status (completed/failed)
+• analysis_results — hasil analisis tiap scan — 5 skor kondisi, skor kesehatan keseluruhan, dan detail analisis (termasuk frame dan skor per pose) dalam bentuk JSON
+• products — katalog produk skincare — merek, nama, kategori, deskripsi, kandungan, tautan Shopee/Tokopedia
+• chat_messages — riwayat chat dengan asisten — pertanyaan customer dan jawaban asisten
+• activity_logs — log aktivitas — siapa melakukan apa dan kapan (login, verifikasi, scan)
+• otp_tokens — kode OTP — kode 6 angka, untuk apa, sudah dipakai atau belum, kapan kedaluwarsa
+• system_settings — pengaturan sistem — kunci dan nilai pengaturan admin (kuota, mode, kunci API)
+
+### Penyimpanan data scan
+
+Data scan tersimpan di database TiDB: tabel skin_scans menyimpan siapa yang scan, jalur foto, dan statusnya; tabel analysis_results menyimpan 5 skor kondisi, skor kesehatan keseluruhan, dan detail analisis (termasuk frame dan skor per pose) dalam bentuk JSON. File fotonya sendiri disimpan di server — di Vercel di /tmp/storage/scans (sementara, hilang tiap instance mendingin) dan tidak disajikan lewat API, jadi admin hanya melihat status dan skornya di Audit Scan.
 
 ---
 

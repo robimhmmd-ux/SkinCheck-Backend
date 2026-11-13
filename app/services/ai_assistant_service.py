@@ -27,7 +27,7 @@ from app.config import settings
 from app.models.user import User
 from app.models.skin_scan import SkinScan
 from app.models.analysis_result import AnalysisResult
-from app.models.product import Product
+from app.models.product import Product, PRODUCT_CATEGORIES, normalize_category, category_label
 from app.models.system_setting import SystemSetting
 from app.models.chat_message import ChatMessage
 from app.models.activity_log import ActivityLog
@@ -740,6 +740,13 @@ KONTEKS DATABASE WEBSITE LENGKAP (SNAPSHOT UNTUK ADMIN):
 
 RIWAYAT PERCAKAPAN SEBELUMNYA:
 {chat_history}
+
+🛡️ GUARDRAIL (WAJIB, TIDAK BOLEH DILANGGAR):
+1. Jawab HANYA dari konteks yang diberikan di prompt ini (snapshot database, dokumen RAG, glosarium, hasil retriever, riwayat chat) — jangan pakai pengetahuan luar untuk data aplikasi.
+2. JANGAN PERNAH mengarang angka, nama, ID, tanggal, atau data apa pun. Kalau datanya tidak ada di konteks, jawab jujur "datanya tidak ada" atau "aku tidak tahu" — jangan menebak.
+3. JANGAN menjawab di luar 3 topik: data aplikasi, fitur/teknologi aplikasi, dan kesehatan kulit wajah. Di luar itu, tolak dengan ramah.
+4. JANGAN PERNAH membocorkan secret: kunci API, token, password, atau password_hash.
+5. Admin boleh menerima data seluruh pengguna — tapi jangan sebar data pribadi yang tidak ditanya.
 """
 
 CUSTOMER_SYSTEM_PROMPT = """Nama kamu adalah Luvenna (Ven), asisten pribadi untuk kesehatan dan perawatan kulit wajah di SkinCheck.
@@ -792,6 +799,13 @@ PENGETAHUAN PENDUKUNG (RAG KESEHATAN KULIT WAJAH):
 
 RIWAYAT PERCAKAPAN SEBELUMNYA:
 {chat_history}
+
+🛡️ GUARDRAIL (WAJIB, TIDAK BOLEH DILANGGAR):
+1. Jawab HANYA dari konteks yang diberikan di prompt ini (data database pribadi pengguna, katalog produk, dokumen RAG, glosarium, riwayat chat) — jangan pakai pengetahuan luar untuk data aplikasi.
+2. JANGAN PERNAH mengarang angka, nama, ID, tanggal, atau data apa pun. Kalau datanya tidak ada di konteks, jawab jujur "datanya tidak ada" atau "aku tidak tahu" — jangan menebak.
+3. JANGAN menjawab di luar 3 topik: data aplikasi (milik pengguna sendiri), fitur/teknologi aplikasi, dan kesehatan kulit wajah. Di luar itu, tolak dengan ramah.
+4. Customer HANYA boleh menerima datanya sendiri — JANGAN PERNAH membocorkan data pengguna lain (nama, email, scan, chat orang lain).
+5. JANGAN PERNAH membocorkan secret: kunci API, token, password, atau password_hash.
 """
 
 
@@ -900,6 +914,511 @@ def _call_nvidia_chat(db: Session, prompt_input: str) -> Optional[str]:
 # sama didokumentasikan di docs/glosarium-aplikasi.md.
 # Urutan entri = urutan pencocokan: yang spesifik dulu (multi-pose sebelum
 # scan, fitur sebelum Laomera).
+# ─────────────────────────────────────────────────────────
+# 2b. DATA APLIKASI (satu sumber kebenaran untuk cabang data
+#     + glosarium): tabel database + pengaturan sistem.
+# ─────────────────────────────────────────────────────────
+
+# Tabel database — NAMA tabel diambil dari __tablename__ tiap model (bukan
+# ketikan tangan); deskripsi menjelaskan apa yang disimpan tiap tabel.
+# Dipakai cabang "tabel database" (dengan jumlah baris live) dan entri
+# glosarium "Tabel database" (teksnya dibangun dari daftar ini).
+_TABLE_MODELS = [
+    (User, "akun pengguna — nama, email, peran (customer/admin), status verifikasi"),
+    (SkinScan, "pemindaian wajah — siapa yang scan, jalur foto, status (completed/failed)"),
+    (AnalysisResult, "hasil analisis tiap scan — 5 skor kondisi, skor kesehatan keseluruhan, dan detail analisis (termasuk frame dan skor per pose) dalam bentuk JSON"),
+    (Product, "katalog produk skincare — merek, nama, kategori, deskripsi, kandungan, tautan Shopee/Tokopedia"),
+    (ChatMessage, "riwayat chat dengan asisten — pertanyaan customer dan jawaban asisten"),
+    (ActivityLog, "log aktivitas — siapa melakukan apa dan kapan (login, verifikasi, scan)"),
+    (OTPToken, "kode OTP — kode 6 angka, untuk apa, sudah dipakai atau belum, kapan kedaluwarsa"),
+    (SystemSetting, "pengaturan sistem — kunci dan nilai pengaturan admin (kuota, mode, kunci API)"),
+]
+DB_TABLES = [(m.__tablename__, desc) for m, desc in _TABLE_MODELS]
+
+_TABLES_TEXT = f"Database aplikasi (TiDB) punya {len(DB_TABLES)} tabel:\n" + "\n".join(
+    f"• {name} — {desc}" for name, desc in DB_TABLES
+)
+
+# Pengaturan sistem NON-RAHASIA yang boleh disebut nilainya oleh chatbot.
+# (key, label tampil, penjelasan, nilai default)
+# Kunci rahasia (GEMINI_API_KEY, NVIDIA_API_KEY, FONNTE_TOKEN, WA_API_TOKEN,
+# MAIL_PASSWORD) TIDAK ada di sini — nilainya tidak pernah disebut.
+# Catatan jujur: VGG_THRESHOLD, OTP_MODE, dan REGISTRATION_OTP_MODE tersimpan
+# di database tapi TIDAK dibaca backend yang live (hanya controller lama yang
+# tidak terpakai yang membacanya) — alur registrasi live selalu OTP WhatsApp
+# + biodata. Cabang pengaturan menyebut ini apa adanya.
+SETTINGS_INFO = [
+    ("SCAN_DAILY_QUOTA", "Kuota scan harian", "batas berapa kali satu pengguna boleh scan dalam sehari; kosong berarti tanpa batas, dan akun tamu (Tester) tidak dihitung kuotanya", ""),
+    ("MAINTENANCE_MODE", "Maintenance mode", "kalau aktif, customer tidak bisa upload scan (admin tetap bisa); scan ditolak dengan pesan layanan sedang perawatan", "off"),
+    ("ALLOW_SAME_PHONE_NUMBER", "Nomor WhatsApp boleh dipakai lebih dari satu akun", "kalau aktif, satu nomor WhatsApp boleh dipakai beberapa akun (kode OTP dikirim per nomor); kalau mati, daftar dengan nomor yang sudah dipakai akun lain ditolak", "off"),
+    ("AI_PROVIDER", "Provider AI chatbot", "penyedia AI yang dipakai chatbot: gemini (Google) atau nvidia (model Llama lewat API OpenAI-compatible)", "gemini"),
+    ("AI_MODEL", "Model Gemini", "nama model Gemini yang dipakai chatbot", "gemini-3.5-flash-lite"),
+    ("AI_MODEL_NVIDIA", "Model NVIDIA", "nama model NVIDIA yang dipakai kalau providernya nvidia", "meta/llama-3.1-8b-instruct"),
+    ("AI_NVIDIA_BASE_URL", "Alamat API NVIDIA", "alamat endpoint API NVIDIA (OpenAI-compatible)", "https://integrate.api.nvidia.com/v1"),
+    ("AI_MAX_TOKENS", "Batas panjang jawaban AI", "jumlah token maksimum jawaban chatbot", "1024"),
+    ("AI_TEMPERATURE", "Temperatur AI", "seberapa bebas/kreatif jawaban chatbot (0 sampai 2)", "0.7"),
+    ("AI_SIMULATION_MODE", "Mode simulasi AI", "kalau aktif, chatbot selalu memakai jawaban lokal dan tidak memanggil provider AI sama sekali", "off"),
+    ("VGG_THRESHOLD", "Ambang batas VGG", "tersimpan di pengaturan, tapi saat ini tidak dipakai sebagai batas di kode backend yang live", "40"),
+    ("OTP_MODE", "Mode OTP", "tersimpan di pengaturan, tapi saat ini tidak dibaca backend yang live — alur registrasi live selalu memakai OTP WhatsApp lalu biodata", ""),
+    ("REGISTRATION_OTP_MODE", "Mode registrasi OTP", "tersimpan di pengaturan (default 'dual'), tapi saat ini tidak dibaca backend yang live — alur registrasi live selalu memakai OTP WhatsApp lalu biodata", "dual"),
+    ("MAIL_FROM_NAME", "Nama pengirim email", "nama yang tampil sebagai pengirim email sistem", "SkinCheck AI"),
+]
+
+
+def _product_category_summary(db: Session):
+    """Katalog aktif dikelompokkan per kategori canonical:
+    (terisi: [(label, jumlah, [nama produk])], kosong: [label], total aktif)."""
+    prods = db.query(Product).filter(Product.status == "active").all()
+    grouped = {}
+    for p in prods:
+        grouped.setdefault(normalize_category(p.category), []).append(p)
+    filled, empty = [], []
+    for value, label in PRODUCT_CATEGORIES:
+        items = grouped.get(value, [])
+        if items:
+            filled.append((label, len(items), [f"{x.brand} {x.name}" for x in items]))
+        else:
+            empty.append(label)
+    for cat, items in grouped.items():
+        if cat not in [v for v, _ in PRODUCT_CATEGORIES]:
+            filled.append((category_label(cat), len(items), [f"{x.brand} {x.name}" for x in items]))
+    return filled, empty, len(prods)
+
+
+_CATEGORY_ALIASES = {
+    "face wash": "face wash", "facewash": "face wash", "face-wash": "face wash",
+    "cleanser": "face wash", "pembersih": "face wash",
+    "toner": "toner", "serum": "serum",
+    "moisturizer": "moisturizer", "pelembap": "moisturizer", "pelembab": "moisturizer",
+    "sunscreen": "sunscreen", "sunblock": "sunscreen", "sun screen": "sunscreen",
+    "mask": "mask", "masker": "mask",
+    "exfoliator": "exfoliator", "eksfoliator": "exfoliator",
+}
+
+
+def _detect_category(msg_lower: str):
+    """Kategori canonical yang disebut di pesan, atau None. Alias harus
+    berdiri sendiri (bukan bagian kata lain)."""
+    for alias, canonical in _CATEGORY_ALIASES.items():
+        pat = r"(?<![a-z])" + re.escape(alias) + r"(?:nya|ku|mu)?(?![a-z])"
+        if re.search(pat, msg_lower):
+            return canonical
+    return None
+
+
+def _category_answer(db: Session, msg_lower: str):
+    """Jawaban soal kategori produk — dipakai admin dan customer (info
+    katalog umum, bukan data orang lain). Return None kalau pertanyaannya
+    bukan soal kategori. Angka selalu dihitung dari DB, bukan hardcode."""
+    # Pertanyaan saran ("produk serum apa yang cocok") bukan pertanyaan
+    # kategori — biarkan jatuh ke cabang produk/rekomendasi.
+    if any(w in msg_lower for w in ["cocok", "rekomendasi", "saran", "pakai apa", "pake apa"]):
+        return None
+    cat = _detect_category(msg_lower)
+    wants_category = "kategori" in msg_lower or (cat and "produk" in msg_lower)
+    if not wants_category:
+        return None
+    filled, empty, total = _product_category_summary(db)
+    # (a) Satu kategori spesifik — jumlah + daftar produknya.
+    if cat and any(w in msg_lower for w in ["berapa", "apa aja", "apa saja", "daftar", "mana", "ada"]):
+        cat_label = category_label(cat)
+        items = next((f for f in filled if f[0] == cat_label), None)
+        if not items:
+            return f"Belum ada produk {cat_label} di katalog."
+        names = ", ".join(items[2])
+        return f"Produk {cat_label} ada {items[1]}: {names}."
+    # (b) Kategori secara umum — jumlah kategori sistem + mana yang terisi.
+    labels = ", ".join(label for _, label in PRODUCT_CATEGORIES)
+    lines = [f"Ada {len(PRODUCT_CATEGORIES)} kategori produk di sistem: {labels}."]
+    if filled:
+        parts = ", ".join(f"{label} ({n})" for label, n, _ in filled)
+        lines.append(f"Yang sudah terisi di katalog ada {len(filled)} kategori ({total} produk): {parts}.")
+    if empty:
+        lines.append(f"Yang belum ada produknya: {', '.join(empty)}.")
+    return " ".join(lines)
+
+
+def _settings_answer(db: Session, msg_lower: str):
+    """Jawaban soal pengaturan sistem — admin saja. Hanya kunci
+    non-rahasia (SETTINGS_INFO); nilai kunci API/token tidak pernah
+    disebut. Return None kalau pertanyaannya bukan soal pengaturan."""
+    def _value(key, default):
+        return (SystemSetting.get_value(db, key, default) or "").strip()
+
+    def _fmt_value(key, raw):
+        if key == "SCAN_DAILY_QUOTA":
+            return f"{raw} kali per hari" if raw else "tanpa batas (belum disetel)"
+        if key == "MAINTENANCE_MODE":
+            return "aktif" if raw.lower() in ("on", "true", "1") else "tidak aktif"
+        if key == "ALLOW_SAME_PHONE_NUMBER":
+            return "boleh (aktif)" if raw.lower() in ("on", "true", "1") else "tidak boleh (mati)"
+        if key == "AI_SIMULATION_MODE":
+            return "aktif" if raw.lower() in ("on", "true", "1") else "tidak aktif"
+        if key == "AI_PROVIDER":
+            model_key = "AI_MODEL_NVIDIA" if raw.lower() == "nvidia" else "AI_MODEL"
+            # Default model diambil dari SETTINGS_INFO (satu sumber kebenaran
+            # untuk default), bukan diketik ulang di sini.
+            model_default = next(d for k, _, _, d in SETTINGS_INFO if k == model_key)
+            model = _value(model_key, model_default)
+            return f"{raw} (model {model})"
+        return raw if raw else "(belum disetel)"
+
+    matchers = [
+        (["kuota"], "SCAN_DAILY_QUOTA"),
+        (["maintenance", "pemeliharaan"], "MAINTENANCE_MODE"),
+        (["nomor wa sama", "nomor whatsapp sama", "nomor yang sama", "nomor sama"], "ALLOW_SAME_PHONE_NUMBER"),
+        (["provider"], "AI_PROVIDER"),
+        (["model nvidia", "model llama"], "AI_MODEL_NVIDIA"),
+        (["model gemini"], "AI_MODEL"),
+        (["model"], "AI_MODEL"),
+        (["base url", "alamat nvidia", "alamat api nvidia"], "AI_NVIDIA_BASE_URL"),
+        (["max token", "maksimal token", "batas token", "token jawaban"], "AI_MAX_TOKENS"),
+        (["temperature", "temperatur", "suhu"], "AI_TEMPERATURE"),
+        (["simulasi", "simulation"], "AI_SIMULATION_MODE"),
+        (["vgg threshold", "threshold", "ambang"], "VGG_THRESHOLD"),
+        (["mode registrasi", "registrasi otp", "otp mode", "mode otp"], "REGISTRATION_OTP_MODE"),
+        (["nama pengirim"], "MAIL_FROM_NAME"),
+    ]
+    wants_all = any(w in msg_lower for w in [
+        "pengaturan apa", "setting apa", "daftar pengaturan", "semua pengaturan",
+        "pengaturan sistem", "pengaturan saja", "pengaturan admin",
+    ])
+    matched = []
+    for words, key in matchers:
+        if any(w in msg_lower for w in words):
+            if key not in matched:
+                matched.append(key)
+    is_settings_q = (
+        wants_all
+        or matched
+        or any(w in msg_lower for w in ["pengaturan", "setting", "settings", "konfigurasi"])
+    )
+    if not is_settings_q:
+        return None
+    info = {k: (label, desc, default) for k, label, desc, default in SETTINGS_INFO}
+    if wants_all or not matched:
+        lines = ["Pengaturan sistem saat ini (nilai dari database):"]
+        for key, label, desc, default in SETTINGS_INFO:
+            lines.append(f"• {label}: {_fmt_value(key, _value(key, default))}")
+        return "\n".join(lines)
+    parts = []
+    for key in matched:
+        label, desc, default = info[key]
+        parts.append(f"{label} saat ini: {_fmt_value(key, _value(key, default))}. {desc}")
+    return " ".join(parts)
+
+
+def _tables_answer(db: Session):
+    """Daftar tabel database + jumlah baris live tiap tabel. Nama tabel
+    diambil dari __tablename__ model (lewat DB_TABLES/_TABLE_MODELS),
+    jumlah baris dihitung dari DB saat pertanyaan masuk."""
+    lines = [f"Database aplikasi (TiDB) punya {len(DB_TABLES)} tabel:"]
+    for (name, desc), (model, _) in zip(DB_TABLES, _TABLE_MODELS):
+        n = db.query(func.count(model.id)).scalar() or 0
+        lines.append(f"• {name} ({n} baris) — {desc}")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────
+# 2c. RETRIEVER DATABASE — jalan terakhir sebelum penolakan.
+# ─────────────────────────────────────────────────────────
+# (2026-11-13) Cabang keyword tidak akan pernah menutup "tanya apa pun"
+# — selalu ada kalimat yang lolos. Retriever mendeteksi ENTITAS dari
+# pertanyaan lalu mengambil datanya dari DB sesuai scope peran, sehingga
+# pertanyaan bebas ("produk apa yang paling baru ditambahkan", "siapa
+# pengguna yang terakhir daftar") tetap terjawab dari data asli.
+# Urutan di fallback: cabang spesifik (data/glosarium/RAG/skincare) dulu,
+# retriever sesudahnya, penolakan ramah terakhir. Retriever TIDAK pernah
+# menyebut nilai secret (kunci API/token/password_hash).
+
+def _has_word(msg_lower: str, word: str) -> bool:
+    """Apakah kata berdiri sendiri di pesan (bukan bagian kata lain).
+    Pola yang sama dengan pencocokan alias glosarium."""
+    pat = r"(?<![a-z])" + re.escape(word) + r"(?:nya|ku|mu|lah|kah|pun)?(?![a-z])"
+    return bool(re.search(pat, msg_lower))
+
+
+def _retrieve_for_question(db: Session, user_id, role: str, msg_lower: str):
+    """Ambil data dari DB berdasarkan entitas di pertanyaan, sesuai scope
+    peran. Return jawaban (str) atau None kalau tidak ada entitas/data
+    yang relevan — pemanggil lalu melanjutkan ke RAG/penolakan."""
+    is_admin = role == "admin"
+
+    def _privacy():
+        return SafetyLayer.DATABASE_RESTRICTION_REJECTION
+
+    # ── Intent spesifik dulu (sebelum ringkasan entitas umum), supaya
+    # pertanyaan multi-entitas dijawab tepat ("skor rata-rata semua
+    # pengguna" = rata-rata skor, bukan daftar pengguna).
+    # (a) Pengguna yang belum pernah scan / belum pernah chat (admin saja).
+    if "belum pernah scan" in msg_lower or "belum pernah chat" in msg_lower:
+        if not is_admin:
+            return _privacy()
+        if "belum pernah scan" in msg_lower:
+            scanned = {r[0] for r in db.query(SkinScan.user_id).distinct().all()}
+            never = [u for u in db.query(User).filter(User.role == "customer").order_by(User.name).all()
+                     if u.id not in scanned]
+            if not never:
+                return "Semua customer sudah pernah scan."
+            names = ", ".join(f"{u.name} ({u.email})" for u in never)
+            return f"Customer yang belum pernah scan ada {len(never)}: {names}."
+        chatted = {r[0] for r in db.query(ChatMessage.user_id).distinct().all()}
+        never = [u for u in db.query(User).filter(User.role == "customer").order_by(User.name).all()
+                 if u.id not in chatted]
+        if not never:
+            return "Semua customer sudah pernah chat dengan asisten."
+        names = ", ".join(f"{u.name} ({u.email})" for u in never)
+        return f"Customer yang belum pernah chat dengan asisten ada {len(never)}: {names}."
+    # (b) Pengguna yang terakhir daftar (admin saja).
+    if any(w in msg_lower for w in ["terakhir daftar", "terakhir terdaftar", "baru daftar", "terakhir bergabung"]):
+        if not is_admin:
+            return _privacy()
+        newest = db.query(User).order_by(User.created_at.desc()).first()
+        if not newest:
+            return "Belum ada pengguna yang terdaftar."
+        when = newest.created_at.strftime("%d %B %Y") if newest.created_at else "-"
+        return f"Pengguna yang terakhir daftar adalah {newest.name} ({newest.email}, {newest.role}, {newest.status}) — {when}."
+    # (c) Produk yang paling baru ditambahkan (info katalog umum).
+    if any(w in msg_lower for w in ["paling baru", "terbaru", "baru ditambahkan", "terakhir ditambahkan"]):
+        if any(_has_word(msg_lower, w) for w in ["produk", "katalog", "barang"]):
+            newest = db.query(Product).filter(Product.status == "active").order_by(Product.created_at.desc()).limit(3).all()
+            if not newest:
+                return "Belum ada produk di katalog."
+            lines = ["Produk yang paling baru ditambahkan:"]
+            for p in newest:
+                when = p.created_at.strftime("%d %B %Y") if p.created_at else "-"
+                lines.append(f"• {p.brand} {p.name} ({category_label(p.category)}) — {when}")
+            return "\n".join(lines)
+    # (d) Customer yang terakhir chat (admin saja).
+    if any(w in msg_lower for w in ["terakhir chat", "terakhir nanya", "terakhir bertanya", "terakhir ngobrol"]):
+        if not is_admin:
+            return _privacy()
+        last = (
+            db.query(ChatMessage, User.name, User.email)
+            .join(User, ChatMessage.user_id == User.id)
+            .filter(User.role == "customer", ChatMessage.role == "user")
+            .order_by(ChatMessage.created_at.desc())
+            .first()
+        )
+        if not last:
+            return "Belum ada customer yang chat dengan asisten."
+        m, nm, em = last
+        when = m.created_at.strftime("%d %B %Y, %H:%M WIB") if m.created_at else "-"
+        text = (m.content or "").strip().replace("\n", " ")
+        if len(text) > 120:
+            text = text[:120] + "…"
+        return f"Customer yang terakhir chat adalah {nm} ({em}), {when} — terakhir bertanya: \"{text}\"."
+    # (e) Aktivitas satu pengguna yang disebut namanya.
+    if any(_has_word(msg_lower, w) for w in ["log", "aktivitas"]):
+        target = find_user_by_name(db, msg_lower)
+        if target and (is_admin or (user_id and target.id == user_id)):
+            logs = (
+                db.query(ActivityLog)
+                .filter(ActivityLog.user_id == target.id)
+                .order_by(ActivityLog.created_at.desc())
+                .limit(3)
+                .all()
+            )
+            if not logs:
+                return f"Belum ada aktivitas tercatat untuk {target.name}."
+            lines = [f"Aktivitas terakhir {target.name}:"]
+            for l in logs:
+                when = l.created_at.strftime("%d %B %Y, %H:%M WIB") if l.created_at else "-"
+                lines.append(f"• {l.activity} ({when})")
+            return "\n".join(lines)
+        if target and not is_admin:
+            return _privacy()
+
+    # ── Ringkasan per entitas (umum). ──
+    parts = []
+
+    # Kategori produk — info katalog umum (admin + customer).
+    if "kategori" in msg_lower:
+        ans = _category_answer(db, msg_lower)
+        if ans:
+            parts.append(ans)
+
+    # Tren / skor rata-rata platform.
+    if any(_has_word(msg_lower, w) for w in ["tren", "skor", "rata-rata", "rerata"]):
+        if not is_admin and not any(w in msg_lower for w in ["saya", "aku", "ku"]):
+            return _privacy()
+        q = db.query(
+            func.count(AnalysisResult.id).label("total"),
+            func.avg(AnalysisResult.overall_score).label("overall"),
+            func.avg(AnalysisResult.acne_score).label("acne"),
+            func.avg(AnalysisResult.oily_skin_score).label("oily"),
+            func.avg(AnalysisResult.dry_skin_score).label("dry"),
+            func.avg(AnalysisResult.dark_spots_score).label("dark_spots"),
+            func.avg(AnalysisResult.wrinkles_score).label("wrinkles"),
+        )
+        if not is_admin:
+            q = q.join(SkinScan, AnalysisResult.skin_scan_id == SkinScan.id).filter(SkinScan.user_id == user_id)
+        avg_m = q.first()
+        tot_v = getattr(avg_m, "total", 0) or 0
+        if tot_v == 0:
+            parts.append("Belum ada hasil scan yang dianalisis, jadi belum ada rata-rata skor.")
+        else:
+            who = "semua pengguna" if is_admin else "kamu"
+            parts.append(
+                f"Rata-rata skor {who} dari {tot_v} analisis: kesehatan keseluruhan "
+                f"{round(getattr(avg_m, 'overall', 0) or 0, 1)}/100, jerawat "
+                f"{round(getattr(avg_m, 'acne', 0) or 0, 1)}%, berminyak "
+                f"{round(getattr(avg_m, 'oily', 0) or 0, 1)}%, kering "
+                f"{round(getattr(avg_m, 'dry', 0) or 0, 1)}%, dark spots "
+                f"{round(getattr(avg_m, 'dark_spots', 0) or 0, 1)}%, kerutan "
+                f"{round(getattr(avg_m, 'wrinkles', 0) or 0, 1)}%."
+            )
+
+    # Scan — admin: seluruh scan; customer: scan sendiri saja.
+    if any(_has_word(msg_lower, w) for w in ["scan", "pemindaian", "pemeriksaan"]):
+        if is_admin:
+            total = db.query(SkinScan).count()
+            completed = db.query(SkinScan).filter(SkinScan.status == "completed").count()
+            failed = db.query(SkinScan).filter(SkinScan.status == "failed").count()
+            parts.append(f"Total ada {total} scan — {completed} berhasil dianalisis dan {failed} gagal.")
+        else:
+            mine = db.query(SkinScan).filter(SkinScan.user_id == user_id).all()
+            total = len(mine)
+            completed = len([s for s in mine if s.status == "completed"])
+            failed = len([s for s in mine if s.status == "failed"])
+            parts.append(f"Kamu sudah scan {total} kali — {completed} berhasil dianalisis dan {failed} gagal.")
+
+    # Produk — info katalog umum (admin + customer).
+    if any(_has_word(msg_lower, w) for w in ["produk", "katalog", "barang"]):
+        filled, empty, total = _product_category_summary(db)
+        if filled:
+            per_cat = ", ".join(f"{label} ({n})" for label, n, _ in filled)
+            parts.append(f"Katalog punya {total} produk aktif dalam {len(filled)} kategori: {per_cat}.")
+        else:
+            parts.append("Katalog masih kosong — belum ada produk aktif.")
+
+    # Log / aktivitas — admin: semua; customer: aktivitas sendiri saja.
+    if any(_has_word(msg_lower, w) for w in ["log", "aktivitas"]):
+        if is_admin:
+            rows = (
+                db.query(ActivityLog, User.name)
+                .outerjoin(User, ActivityLog.user_id == User.id)
+                .order_by(ActivityLog.created_at.desc())
+                .limit(5)
+                .all()
+            )
+            if not rows:
+                parts.append("Belum ada aktivitas yang tercatat di log.")
+            else:
+                lines = ["Aktivitas terakhir di sistem:"]
+                for l, nm in rows:
+                    who = nm or f"User #{l.user_id}"
+                    when = l.created_at.strftime("%d/%m %H:%M") if l.created_at else "-"
+                    lines.append(f"• [{when}] {who}: {l.activity}")
+                parts.append("\n".join(lines))
+        else:
+            rows = (
+                db.query(ActivityLog)
+                .filter(ActivityLog.user_id == user_id)
+                .order_by(ActivityLog.created_at.desc())
+                .limit(5)
+                .all()
+            )
+            if not rows:
+                parts.append("Belum ada aktivitas tercatat untuk akunmu.")
+            else:
+                lines = ["Aktivitas terakhir di akunmu:"]
+                for l in rows:
+                    when = l.created_at.strftime("%d %B %Y, %H:%M WIB") if l.created_at else "-"
+                    lines.append(f"• {l.activity} ({when})")
+                parts.append("\n".join(lines))
+
+    # Chat / obrolan — admin: tren + jumlah; customer: chat sendiri saja.
+    if any(_has_word(msg_lower, w) for w in ["chat", "obrolan", "pertanyaan"]):
+        if is_admin:
+            total_q = (
+                db.query(ChatMessage)
+                .join(User, ChatMessage.user_id == User.id)
+                .filter(User.role == "customer", ChatMessage.role == "user")
+                .count()
+            )
+            top = top_customer_questions(db, limit=3)
+            if not top:
+                parts.append("Belum ada customer yang chat dengan asisten.")
+            else:
+                lines = [f"Customer sudah mengajukan {total_q} pertanyaan ke asisten. Yang paling sering ditanyakan:"]
+                for i, t in enumerate(top, 1):
+                    lines.append(f"{i}. \"{t['question']}\" — {t['count']} kali")
+                parts.append("\n".join(lines))
+        else:
+            n = db.query(ChatMessage).filter(ChatMessage.user_id == user_id, ChatMessage.role == "user").count()
+            parts.append(f"Kamu sudah mengajukan {n} pertanyaan ke asisten.")
+
+    # Pengaturan sistem — admin saja.
+    if any(_has_word(msg_lower, w) for w in ["pengaturan", "setting", "settings", "konfigurasi", "kuota", "maintenance"]):
+        if not is_admin:
+            return _privacy()
+        ans = _settings_answer(db, msg_lower)
+        if ans:
+            parts.append(ans)
+
+    # Verifikasi — admin: daftar belum verifikasi; customer: status sendiri.
+    if any(_has_word(msg_lower, w) for w in ["verifikasi", "verif", "otp", "pending", "biodata"]):
+        if is_admin:
+            unver = db.query(User).filter(User.status.in_(["pending", "awaiting_biodata"])).order_by(User.created_at.desc()).all()
+            if not unver:
+                parts.append("Tidak ada akun yang belum verifikasi saat ini.")
+            else:
+                descs = []
+                for u in unver:
+                    if u.status == "pending":
+                        descs.append(f"{u.name} ({u.email}) masih menunggu verifikasi kode OTP")
+                    else:
+                        descs.append(f"{u.name} ({u.email}) sudah verifikasi OTP, belum melengkapi biodata")
+                parts.append(f"Ada {len(unver)} akun yang belum verifikasi: " + "; ".join(descs) + ".")
+        else:
+            me = db.query(User).filter(User.id == user_id).first() if user_id else None
+            if me:
+                labels = {"active": "aktif", "pending": "menunggu verifikasi OTP",
+                          "awaiting_biodata": "menunggu biodata", "suspended": "ditangguhkan",
+                          "inactive": "belum aktif"}
+                parts.append(f"Akunmu saat ini berstatus {labels.get(me.status, me.status)}.")
+
+    # Tabel database — daftar tabel + jumlah baris live.
+    if "tabel" in msg_lower:
+        parts.append(_tables_answer(db))
+
+    # Pengguna — admin saja (data orang lain). Diletakkan terakhir supaya
+    # tidak merebut pertanyaan yang entitas utamanya hal lain ("skor
+    # rata-rata semua pengguna" sudah dijawab entitas tren/skor di atas).
+    if any(_has_word(msg_lower, w) for w in ["pengguna", "user", "akun", "member", "customer"]):
+        if not is_admin:
+            return _privacy()
+        total = db.query(User).count()
+        customers = db.query(User).filter(User.role == "customer").count()
+        admins = db.query(User).filter(User.role == "admin").count()
+        newest = db.query(User).order_by(User.created_at.desc()).limit(5).all()
+        names = ", ".join(f"{u.name} ({u.email})" for u in newest)
+        parts.append(f"Total ada {total} pengguna (customer: {customers}, admin: {admins}). {len(newest)} terbaru: {names}.")
+
+    if not parts:
+        return None
+    return "\n".join(parts)
+
+
+# Teks glosarium soal kategori — daftar kategori diambil dari konstanta
+# kanonis PRODUCT_CATEGORIES (app/models/product.py), bukan diketik ulang.
+_CATEGORY_GLOSSARY_TEXT = (
+    f"Ada {len(PRODUCT_CATEGORIES)} kategori produk di sistem: "
+    + ", ".join(label for _, label in PRODUCT_CATEGORIES)
+    + ". Kategori lama 'cleanser' dinormalisasi jadi face wash, jadi produk "
+      "cleanser lama tetap masuk filter face wash. Admin memilih kategori "
+      "saat menambah produk di halaman Produk."
+)
+_MARKETPLACE_GLOSSARY_TEXT = (
+    "Marketplace adalah katalog produk skincare di aplikasi — kamu bisa cari "
+    "produk berdasarkan kategori ("
+    + ", ".join(label for _, label in PRODUCT_CATEGORIES)
+    + ") dan membelinya lewat tautan Shopee atau Tokopedia di tiap produk. "
+      "Tidak ada keranjang atau pembayaran di dalam aplikasi."
+)
+
+
 APP_GLOSSARY = [
     ("Akun yang ditangguhkan", ["ditangguhkan", "suspended"],
      "Akun yang ditangguhkan adalah akun yang dinonaktifkan sementara oleh admin — pemiliknya tidak bisa login dan tidak bisa memakai fitur apa pun sampai admin memulihkannya. Berbeda dengan akun pending (akun baru yang belum selesai verifikasi), akun ditangguhkan adalah akun yang sengaja diberhentikan sementara oleh admin."),
@@ -941,7 +1460,23 @@ APP_GLOSSARY = [
      "Audit Scan adalah halaman admin yang menampilkan semua pemindaian dari semua pengguna beserta status dan hasilnya — admin bisa memeriksa scan siapa saja, kapan, dan berhasil atau gagal."),
     ("Log Aktivitas", ["log aktivitas", "log"],
      "Log Aktivitas adalah catatan semua kejadian penting di aplikasi — siapa mendaftar, siapa verifikasi, siapa scan — beserta waktunya. Admin melihatnya di halaman Log Aktivitas."),
-    ("Scan multi-pose", ["multi-pose", "multi pose", "12 frame", "12 foto"],
+    # Entri pengaturan + database diletakkan SEBELUM entri Scan — kalau
+    # tidak, "apa itu kuota scan" direbut alias "scan" yang lebih generik.
+    ("Kuota scan harian", ["kuota scan", "kuota"],
+     "Kuota scan harian (SCAN_DAILY_QUOTA) membatasi berapa kali satu pengguna boleh scan dalam sehari. Kalau nilainya kosong berarti tanpa batas, dan akun tamu (Tester) tidak dihitung kuotanya. Admin mengaturnya di Konfigurasi → tab AI."),
+    ("Maintenance mode", ["maintenance mode", "maintenance", "mode pemeliharaan"],
+     "Maintenance mode adalah saklar perawatan: kalau aktif, customer tidak bisa upload scan dan mendapat pesan layanan sedang perawatan — admin tetap bisa scan. Admin mengaturnya di Konfigurasi → tab AI."),
+    ("Nomor WhatsApp boleh dipakai lebih dari satu akun", ["nomor whatsapp sama", "nomor wa sama", "nomor sama"],
+     "Pengaturan ini (ALLOW_SAME_PHONE_NUMBER) menentukan apakah satu nomor WhatsApp boleh dipakai lebih dari satu akun. Kalau mati, daftar dengan nomor yang sudah dipakai akun lain ditolak; kalau hidup, boleh — kode OTP dikirim per nomor. Admin mengaturnya di Konfigurasi → tab OTP."),
+    ("VGG threshold", ["vgg threshold", "threshold"],
+     "VGG threshold adalah ambang batas skor yang tersimpan di pengaturan — tapi saat ini tidak dipakai sebagai batas di kode backend yang live, jadi mengubahnya tidak mengubah hasil scan."),
+    ("Mode registrasi OTP", ["mode registrasi otp", "mode otp", "otp mode"],
+     "Mode registrasi OTP (REGISTRATION_OTP_MODE, default 'dual') tersimpan di pengaturan, tapi saat ini tidak dibaca backend yang live — alur registrasi yang live selalu memakai OTP WhatsApp lalu biodata."),
+    ("Tabel database", ["tabel database", "tabel"],
+     _TABLES_TEXT),
+    ("Penyimpanan data scan", ["data scan disimpan", "disimpan di mana", "penyimpanan scan", "foto scan disimpan"],
+     "Data scan tersimpan di database TiDB: tabel skin_scans menyimpan siapa yang scan, jalur foto, dan statusnya; tabel analysis_results menyimpan 5 skor kondisi, skor kesehatan keseluruhan, dan detail analisis (termasuk frame dan skor per pose) dalam bentuk JSON. File fotonya sendiri disimpan di server — di Vercel di /tmp/storage/scans (sementara, hilang tiap instance mendingin) dan tidak disajikan lewat API, jadi admin hanya melihat status dan skornya di Audit Scan."),
+    ("Scan multi-pose", ["multi-pose", "multi pose", "12 frame", "12 foto", "pose", "frame"],
      "Scan multi-pose adalah scan memakai kamera yang mengambil 12 foto selama 24 detik, dari 6 arah: tengah, kiri, kanan, atas, bawah, dan dekat. Setiap foto yang wajahnya terdeteksi dianalisis, lalu skor-skornya digabung jadi satu hasil."),
     ("Scan wajah", ["scan wajah", "pemindaian wajah", "pemindaian", "scan"],
      "Scan adalah pemeriksaan kondisi kulit wajah lewat foto. Ada dua cara: foto tunggal (satu foto langsung dianalisis) dan multi-pose (kamera mengambil 12 foto selama 24 detik dari 6 arah, lalu hasilnya digabung). Caranya: buka halaman Scan Kulit dari sidebar, pilih foto tunggal atau multi-pose, lalu ikuti panduan kameranya sampai selesai."),
@@ -960,9 +1495,11 @@ APP_GLOSSARY = [
     ("Fonnte (OTP WhatsApp)", ["fonnte", "whatsapp"],
      "Fonnte adalah layanan yang mengirim kode OTP ke WhatsApp kamu saat verifikasi akun. Kalau kode OTP tidak sampai, biasanya masalahnya ada di pengaturan Fonnte (tokennya) — aplikasinya sendiri tetap jalan."),
     ("Marketplace", ["marketplace"],
-     "Marketplace adalah katalog produk skincare di aplikasi — kamu bisa cari produk berdasarkan kategori (face wash, toner, serum, moisturizer, sunscreen, mask, eksfoliator) dan membelinya lewat tautan Shopee atau Tokopedia di tiap produk. Tidak ada keranjang atau pembayaran di dalam aplikasi."),
+     _MARKETPLACE_GLOSSARY_TEXT),
     ("Riwayat & Diagnosis", ["riwayat & diagnosis", "riwayat", "diagnosis"],
      "Riwayat & Diagnosis adalah arsip semua scan yang pernah kamu lakukan, lengkap dengan skor tiap kondisi dan perbandingan dengan scan sebelumnya — jadi kamu bisa melihat progres kesehatan kulitmu dari waktu ke waktu. Caranya: buka halaman Riwayat & Diagnosis dari sidebar — semua scanmu tampil dari yang terbaru. Panel 'Diagnosis Terkini' di atasnya menampilkan hasil scan terbarumu."),
+    ("Kategori produk", ["kategori produk", "kategori"],
+     _CATEGORY_GLOSSARY_TEXT),
     ("Produk", ["katalog produk", "katalog", "produk"],
      "Produk adalah item skincare di katalog aplikasi (marketplace) — masing-masing punya merek, nama, kategori, deskripsi, kandungan, dan tautan Shopee/Tokopedia. Admin mengelolanya di halaman Produk; rekomendasi produk ke customer hanya muncul kalau customer yang memintanya."),
     ("Akun admin", ["akun admin", "siapa saja admin", "daftar admin"],
@@ -990,6 +1527,7 @@ DEFINITION_TRIGGERS = [
     "apa sih", "apa tuh", "fitur apa", "cara ",
     "teknologi apa", "apa yang dipakai", "dipakai untuk", "digunakan", "dibangun",
     "lupa password", "ganti password", "ubah password",
+    "disimpan", "di mana", "dimana",
 ]
 
 # Pertanyaan soal HASIL scan sendiri (bukan pengertian konsep) — glosarium
@@ -1676,7 +2214,7 @@ class AIOrchestrator:
             # pernah dipakai. Sekarang semuanya dari ChatMessage yang sebenarnya,
             # supaya admin bisa melihat customer kebingungan di fitur apa dan
             # pertanyaan apa yang paling sering muncul (bahan update).
-            if any(w in msg_lower for w in ["chat", "obrolan", "keluh", "nanya", "minta", "tren pertanyaan", "identifikasi chat", "pertanyaan customer", "pertanyaan user", "riwayat chat", "baca chat", "sering nanya", "sering ditanya"]):
+            if any(w in msg_lower for w in ["chat", "obrolan", "keluh", "nanya", "minta", "tren pertanyaan", "identifikasi chat", "pertanyaan customer", "pertanyaan user", "riwayat chat", "baca chat", "sering nanya", "sering ditanya"]) and not any(w in msg_lower for w in ["terakhir chat", "terakhir nanya", "terakhir bertanya", "terakhir ngobrol", "belum pernah chat"]):
                 # (a) Baca riwayat chat satu customer — nama disebut di pertanyaan.
                 if any(w in msg_lower for w in ["baca chat", "riwayat chat", "chatnya", "obrolan"]):
                     target = find_user_by_name(db, msg_lower, role="customer")
@@ -1747,7 +2285,7 @@ class AIOrchestrator:
             # NOTE: kata umum seperti "website"/"database" sengaja TIDAK masuk
             # daftar ini — kalau tidak, pertanyaan data ("aktivitas terakhir di
             # website?") malah dijawab panduan koding.
-            if any(w in msg_lower for w in ["koding", "coding", "perbaiki", "fix", "bug", "python", "javascript", "fastapi", "html", "css", "controller", "fungsi", "error", "script", "ubah", "tambah", "arsitektur"]):
+            if any(w in msg_lower for w in ["koding", "coding", "perbaiki", "fix", "bug", "python", "javascript", "fastapi", "html", "css", "controller", "fungsi", "error", "script", "ubah", "tambah", "arsitektur"]) and not any(w in msg_lower for w in ["ditambahkan", "tambah produk", "tambah pengguna", "tambah customer", "tambah akun", "menambah produk", "menambah pengguna", "ubah nama", "ganti nama", "ubah email", "ganti email"]):
                 return (
                     "**Panduan Teknis Sistem SkinCheck (Akses Khusus Admin):**\n"
                     "Sebagai Admin, Anda memiliki kontrol penuh atas arsitektur dan kodingan sistem. Berikut ringkasan modul utama:\n"
@@ -1771,7 +2309,7 @@ class AIOrchestrator:
             # data pengguna. Jadi semua pertanyaan ber-kata "scan" masuk
             # sini dulu, dan pertanyaan yang spesifik dijawab to-the-point
             # (1-2 kalimat), bukan laporan panjang.
-            if any(w in msg_lower for w in ["scan", "pemindaian", "foto"]):
+            if any(w in msg_lower for w in ["scan", "pemindaian", "foto"]) and "belum pernah scan" not in msg_lower and not any(w in msg_lower for w in ["kuota", "maintenance", "pengaturan", "setting", "konfigurasi"]):
                 # (a) Per akun — nama disebut ("berapa kali Budi scan",
                 # "Budi sering scan?"). Dicek dulu supaya pertanyaan tentang
                 # satu orang tidak dijawab dengan top 3 seluruh pengguna.
@@ -1808,6 +2346,59 @@ class AIOrchestrator:
                         rest = ", ".join(f"{n} {c} kali" for n, _e, c in top[1:])
                         res += f" Di bawahnya ada {rest}."
                     return res
+                # (b2) Scan gagal — siapa saja (daftar, bukan cuma jumlah).
+                # (2026-11-13) Cabang 4(c) hanya menjawab jumlah total/gagal;
+                # "scan gagal siapa aja" butuh daftarnya.
+                if "gagal" in msg_lower and any(w in msg_lower for w in ["siapa", "daftar", "mana", "aja"]):
+                    failed = (
+                        db.query(SkinScan, User.name)
+                        .join(User, SkinScan.user_id == User.id)
+                        .filter(SkinScan.status == "failed")
+                        .order_by(SkinScan.created_at.desc())
+                        .limit(5)
+                        .all()
+                    )
+                    total_fail = db.query(SkinScan).filter(SkinScan.status == "failed").count()
+                    if not failed:
+                        return "Tidak ada scan yang gagal — semua scan berhasil dianalisis."
+                    names = ", ".join(
+                        f"{nm} ({s.created_at.strftime('%d/%m %H:%M') if s.created_at else '-'})"
+                        for s, nm in failed
+                    )
+                    return f"Ada {total_fail} scan yang gagal. Yang terbaru: {names}."
+                # (b3) Detail frame/pose — jujur soal apa yang tersimpan.
+                # (2026-11-13) Jumlah frame TIDAK disimpan sebagai kolom di
+                # database; yang tersimpan hanya status + jalur foto di
+                # skin_scans, sedangkan detail frame dan skor per pose ada di
+                # dalam analysis_results.ai_response (JSON) — kalau ada.
+                if "frame" in msg_lower or "pose" in msg_lower:
+                    latest_ar = (
+                        db.query(AnalysisResult)
+                        .order_by(AnalysisResult.created_at.desc())
+                        .first()
+                    )
+                    detail = {}
+                    if latest_ar and latest_ar.ai_response:
+                        try:
+                            detail = json.loads(latest_ar.ai_response) or {}
+                        except Exception:
+                            detail = {}
+                    passed = detail.get("frames_passed_yunet")
+                    used = detail.get("frames_used_vgg")
+                    per_pose = detail.get("per_pose") or {}
+                    if passed is None and not per_pose:
+                        return (
+                            "Jumlah frame tidak disimpan sebagai kolom di database — scan multi-pose mengambil "
+                            "12 foto dari 6 arah (tengah, kiri, kanan, atas, bawah, dekat); yang tersimpan di tabel "
+                            "skin_scans hanya status dan jalur foto, sedangkan detail frame dan skor per pose tersimpan "
+                            "di dalam hasil analisis (analysis_results.ai_response). Di data saat ini tidak ada detail "
+                            "frame yang tersimpan."
+                        )
+                    poses = ", ".join(sorted(per_pose.keys())) if per_pose else "-"
+                    return (
+                        f"Di analisis terbaru: {passed} frame yang wajahnya terdeteksi, {used} frame dipakai "
+                        f"untuk penilaian. Skor per pose tersedia untuk: {poses}."
+                    )
                 # (c) Total scan keseluruhan.
                 if any(w in msg_lower for w in ["total", "jumlah", "berapa"]):
                     total_scans = db.query(SkinScan).count()
@@ -1918,8 +2509,35 @@ class AIOrchestrator:
                     f"{n_bio} menunggu biodata, {n_susp} ditangguhkan, dan {n_inact} nonaktif."
                 )
 
+            # 4c. Kategori produk — jumlah kategori + mana yang terisi.
+            # (2026-11-13) "ada berapa kategori produk" sebelumnya dijawab
+            # cabang produk dengan DAFTAR 5 produk, dan "saya mau kategorinya
+            # aja ada berapa" malah jatuh ke penolakan luar ruang lingkup —
+            # karena kata "kategori" tidak ada di cabang mana pun. Cabang ini
+            # dicek sebelum cabang produk (6) karena "produk" ada di
+            # pertanyaan kategori. Angka selalu dihitung dari DB.
+            _cat_answer = _category_answer(db, msg_lower)
+            if _cat_answer is not None:
+                return _cat_answer
+
+            # 4d. Pengaturan sistem — nilai live dari database, tanpa secret.
+            # (2026-11-13) "berapa kuota scan harian" / "apakah maintenance
+            # mode aktif" sebelumnya tidak memicu cabang mana pun dan jatuh
+            # ke penolakan luar ruang lingkup, padahal nilainya ada di
+            # system_settings. Nilai kunci API/token tidak pernah disebut.
+            _set_answer = _settings_answer(db, msg_lower)
+            if _set_answer is not None:
+                return _set_answer
+
+            # 4e. Tabel database — daftar tabel + jumlah baris live.
+            # (2026-11-13) "tabel apa aja di database" sebelumnya tidak
+            # memicu cabang mana pun (kata "database" sengaja tidak masuk
+            # cabang koding) dan jatuh ke penolakan luar ruang lingkup.
+            if "tabel" in msg_lower:
+                return _tables_answer(db)
+
             # 5. Users snapshot
-            if any(w in msg_lower for w in ["user", "pengguna", "customer", "member", "akun"]):
+            if any(w in msg_lower for w in ["user", "pengguna", "customer", "member", "akun"]) and not any(w in msg_lower for w in ["terakhir daftar", "terakhir terdaftar", "baru daftar", "paling baru", "terakhir bergabung", "belum pernah scan", "belum pernah chat", "terakhir chat", "terakhir nanya", "terakhir bertanya", "terakhir ngobrol", "skor", "rata-rata", "rerata", "tren"]):
                 total_users = db.query(User).count()
                 customers = db.query(User).filter(User.role == "customer").count()
                 admins = db.query(User).filter(User.role == "admin").count()
@@ -1936,7 +2554,21 @@ class AIOrchestrator:
                 return "\n".join(res)
 
             # 6. Products snapshot
-            if any(w in msg_lower for w in ["produk", "katalog", "shopee", "barang"]):
+            if any(w in msg_lower for w in ["produk", "katalog", "shopee", "barang"]) and not any(w in msg_lower for w in ["paling baru", "terbaru", "baru ditambahkan", "terakhir ditambahkan"]):
+                # 6a. Produk tanpa tautan Shopee/Tokopedia — daftar yang
+                # belum ada linknya (bukan seluruh katalog).
+                if "belum" in msg_lower and ("shopee" in msg_lower or "tokopedia" in msg_lower or "link" in msg_lower):
+                    use_tokopedia = "tokopedia" in msg_lower
+                    link_col = Product.tokopedia_link if use_tokopedia else Product.shopee_link
+                    market = "Tokopedia" if use_tokopedia else "Shopee"
+                    missing = db.query(Product).filter(
+                        Product.status == "active",
+                        (link_col.is_(None)) | (link_col == ""),
+                    ).all()
+                    if not missing:
+                        return f"Semua produk aktif sudah punya tautan {market}."
+                    names = ", ".join(f"{p.brand} {p.name} ({category_label(p.category)})" for p in missing)
+                    return f"Produk yang belum ada tautan {market} ada {len(missing)}: {names}."
                 total_prods = db.query(Product).count()
                 with_shopee = db.query(Product).filter(Product.shopee_link.isnot(None), Product.shopee_link != "").count()
                 prods = db.query(Product).limit(8).all()
@@ -1951,12 +2583,28 @@ class AIOrchestrator:
                     res.append(f"• {p.brand} {p.name} ({p.category.capitalize()}){shopee_info}")
                 return "\n".join(res)
 
-            # 7. Activity logs snapshot
-            if any(w in msg_lower for w in ["log", "aktivitas", "riwayat sistem"]):
-                logs = db.query(ActivityLog).order_by(ActivityLog.created_at.desc()).limit(8).all()
+            # 7. Activity logs snapshot — nama pengguna (bukan "User #id").
+            # Pertanyaan soal aktivitas SATU pengguna yang disebut namanya
+            # dibiarkan jatuh ke retriever (yang memfilter per pengguna).
+            if any(w in msg_lower for w in ["log", "aktivitas", "riwayat sistem"]) and not find_user_by_name(db, msg_lower):
+                q = (
+                    db.query(ActivityLog, User.name)
+                    .outerjoin(User, ActivityLog.user_id == User.id)
+                    .order_by(ActivityLog.created_at.desc())
+                )
+                if "terakhir" in msg_lower:
+                    rows = q.limit(1).all()
+                    if not rows:
+                        return "Belum ada aktivitas yang tercatat di log."
+                    l, nm = rows[0]
+                    who = nm or f"User #{l.user_id}"
+                    when = l.created_at.strftime("%d %B %Y, %H:%M WIB") if l.created_at else "-"
+                    return f"Aktivitas terakhir: {who} — {l.activity} ({when})."
+                rows = q.limit(8).all()
                 res = ["**Log Aktivitas Sistem Terkini:**"]
-                for l in logs:
-                    res.append(f"• [{l.created_at.strftime('%d/%m %H:%M')}] User #{l.user_id}: {l.activity} (IP: {l.ip_address or '-'})")
+                for l, nm in rows:
+                    who = nm or f"User #{l.user_id}"
+                    res.append(f"• [{l.created_at.strftime('%d/%m %H:%M')}] {who}: {l.activity} (IP: {l.ip_address or '-'})")
                 return "\n".join(res)
 
             # 8. Admin Dashboard Cards & UI Metrics Overview
@@ -1983,6 +2631,15 @@ class AIOrchestrator:
                     f"• **AI Sessions**: {total_ai_sessions} total sesi obrolan\n"
                     f"Angka-angka di atas sama persis dengan yang tampil di kartu metrik dashboard admin."
                 )
+
+            # 9. Retriever database — jalan terakhir sebelum RAG/penolakan.
+            # (2026-11-13) Cabang keyword tidak menutup "tanya apa pun":
+            # retriever mendeteksi entitas dari pertanyaan dan mengambil
+            # datanya dari DB sesuai scope peran. Kalau tidak ada entitas
+            # yang cocok, lanjut ke RAG (skincare) / penolakan di bawah.
+            _ret = _retrieve_for_question(db, user_id, role, msg_lower)
+            if _ret is not None:
+                return _ret
 
             # Default admin — pertanyaan di luar cabang data/glosarium/skincare.
             # (2026-11-13) Dulu: ringkasan angka DB untuk pertanyaan apa pun yang
@@ -2303,9 +2960,18 @@ class AIOrchestrator:
             else:
                 return "Saat ini belum ada produk dengan tautan Shopee yang tersimpan di database."
 
+        # 5b. Customer bertanya soal kategori produk — info katalog umum,
+        # bukan data orang lain, jadi boleh dijawab. Ditempatkan SEBELUM
+        # cabang 6 (pencarian produk) karena _is_seeking_product juga cocok
+        # dengan kata "produk" — kalau tidak, "ada berapa kategori produk"
+        # dijawab daftar produk, bukan jumlah kategori.
+        _cat_answer = _category_answer(db, msg_lower)
+        if _cat_answer is not None:
+            return _cat_answer
+
         # 6. Customer seeking product recommendation
         is_seeking = self._is_seeking_product(message)
-        if is_seeking:
+        if is_seeking and not any(w in msg_lower for w in ["paling baru", "terbaru", "baru ditambahkan", "terakhir ditambahkan"]):
             all_products = db.query(Product).filter(Product.status == "active").all()
             matched = []
 
@@ -2350,6 +3016,17 @@ class AIOrchestrator:
         # dengan jelas, bukan dijawab dokumen yang tidak nyambung.
         if any(w in msg_lower for w in ["akun mana", "siapa yang paling", "siapa yang sering", "siapa saja yang", "pengguna lain", "akun lain", "customer lain"]):
             return SafetyLayer.DATABASE_RESTRICTION_REJECTION
+
+        # 6c. Retriever database — jalan terakhir sebelum RAG/penolakan.
+        # (2026-11-13) Sama seperti admin: entitas dari pertanyaan diambil
+        # datanya dari DB sesuai scope peran (data sendiri untuk scan/chat/
+        # log/verifikasi, info umum untuk produk/kategori; data orang lain
+        # ditolak privasi). Ditempatkan SEBELUM cabang RAG supaya pertanyaan
+        # seperti "produk apa yang paling baru ditambahkan" tidak dijawab
+        # dokumen skincare acak (kata "produk" ada di SKIN_KEYWORDS).
+        _ret = _retrieve_for_question(db, user_id, role, msg_lower)
+        if _ret is not None:
+            return _ret
 
         # 7. Pure facial skin health / RAG inquiry
         # (2026-11-13) Dokumen RAG hanya dijawab kalau pertanyaannya memang
