@@ -68,5 +68,35 @@
     "category": "faq",
     "title": "Kapan harus ke dokter kulit?",
     "content": "Sebaiknya konsultasikan ke dokter kulit jika: 1) Jerawat parah (kistik/nodul) yang tidak membaik dengan perawatan OTC, 2) Perubahan tahi lalat (warna, bentuk, ukuran), 3) Ruam yang tidak sembuh lebih dari 2 minggu, 4) Gatal kronis tanpa penyebab jelas, 5) Luka yang tidak kunjung sembuh, 6) Kerontokan rambut mendadak. SkinCheck adalah alat bantu indikasi visual, bukan pengganti konsultasi medis."
+  },
+  {
+    "category": "skincare_education",
+    "title": "Jenis & Penyebab Jerawat",
+    "content": "Jerawat muncul saat pori tersumbat oleh sebum berlebih dan sel kulit mati, lalu meradang — sering dibantu bakteri C. acnes dan perubahan hormon. Jenisnya: komedo whitehead (tertutup) dan blackhead (terbuka), papula (benjolan merah), pustula (bernanah), serta nodul dan kistik (besar, dalam, dan nyeri). Apabila jerawat nodul atau kistik yang nyeri, meninggalkan bekas, atau tidak membaik setelah berminggu-minggu, sebaiknya diperiksa dokter kulit."
+  },
+  {
+    "category": "skincare_education",
+    "title": "Dark Spots & Hiperpigmentasi",
+    "content": "Dark spots adalah bercak gelap akibat produksi melanin berlebih. Jenisnya: PIH (bekas jerawat kecokelatan), PIE (kemerahan bekas jerawat), sun spots atau flek dari paparan UV, dan melasma (flek simetris yang sering terkait hormon). Penyebab utamanya matahari dan peradangan. Perawatannya: sunscreen setiap hari adalah wajib, dibantu vitamin C, niacinamide, dan alpha arbutin. Hasilnya butuh berminggu-minggu, jadi perlu sabar dan konsisten."
+  },
+  {
+    "category": "skincare_education",
+    "title": "Kerutan & Anti-Aging",
+    "content": "Kerutan di wajah muncul karena penuaan alami — produksi kolagen menurun seiring usia — ditambah photoaging dari paparan sinar UV, garis ekspresi yang berulang, dan dehidrasi. Perawatan yang terbukti membantu: sunscreen setiap hari untuk mencegah photoaging, retinol untuk merangsang pembaruan sel, dan pelembap untuk mengisi garis halus. Ekspektasi yang realistis: skincare mengurangi tampilan kerutan, bukan menghilangkannya sepenuhnya."
+  },
+  {
+    "category": "skincare_education",
+    "title": "Kulit Kering",
+    "content": "Kenapa kulit bisa kering? Karena skin barrier melemah sehingga kelembapan mudah hilang. Penyebabnya: cuaca dingin atau kering, mandi air panas, sabun yang keras, dan bertambahnya usia. Kulit terasa kencang, kasar, kadang bersisik — berbeda dengan dehidrasi yang lebih soal kekurangan air di dalam kulit. Perawatannya: cleanser lembut, moisturizer dengan ceramide dan hyaluronic acid, serta hindari air panas dan eksfoliasi berlebihan."
+  },
+  {
+    "category": "skincare_education",
+    "title": "Pengaruh Gaya Hidup pada Kulit",
+    "content": "Gaya hidup berpengaruh nyata pada kulit. Tidur cukup penting karena kulit beregenerasi saat tidur — kurang tidur membuat kulit kusam dan jerawat lebih mudah muncul. Asupan gula tinggi dan makanan olahan dikaitkan dengan jerawat yang lebih sering kambuh. Stres meningkatkan hormon kortisol, yang memicu produksi sebum naik. Cukupi air putih dan olahraga teratur untuk membantu kulit tetap sehat dari dalam."
+  },
+  {
+    "category": "skincare_education",
+    "title": "Perbaikan Skin Barrier",
+    "content": "Skin barrier adalah lapisan pelindung terluar kulit. Tanda barrier rusak: kulit kemerahan, terasa perih atau cekatan, kering, dan jadi sensitif terhadap produk yang dulu biasa saja. Cara memperbaikinya: hentikan dulu eksfoliasi dan bahan aktif keras, pakai cleanser lembut, moisturizer dengan ceramide, dan sunscreen. Perbaikan butuh waktu berminggu-minggu — sabar, jangan buru-buru menambah produk baru."
   }
 ]
