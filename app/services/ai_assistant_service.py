@@ -1815,6 +1815,31 @@ DEFINITION_TRIGGERS = [
     "disimpan", "di mana", "dimana",
 ]
 
+# Frasa definisi yang EKSPLISIT — kalau salah satunya ada, pertanyaan itu
+# memang menanyakan pengertian, sekalipun mengandung kata data ("apa itu
+# tren scan" tetap definisi, bukan data).
+_STRONG_DEFINITION_TRIGGERS = [
+    "apa itu", "apa yang dimaksud", "apa artinya", "apa maksud",
+    "jelaskan", "maksudnya", "apa bedanya", "bedanya",
+    "apa fungsi", "fungsinya", "apa kegunaan", "untuk apa", "buat apa",
+    "apa sih", "apa tuh", "fitur apa", "teknologi apa", "apa yang dipakai",
+    "lupa password", "ganti password", "ubah password",
+]
+
+# Penanda niat DATA — pertanyaan soal angka/kesimpulan atas data saat ini
+# ("sekarang", "berarti", "menonjol"), bukan pengertian konsep. Kalau ada
+# penanda ini TANPA frasa definisi eksplisit, glosarium tidak boleh merebut
+# pertanyaan — biarkan jatuh ke cabang data (tren/retriever). Contoh yang
+# pernah dicuri: "berarti lagi tren kondisi kulit yang bagaimana
+# sekarang?" dijawab definisi halaman Tren Scan, padahal yang diminta
+# kesimpulan atas data tren.
+_DATA_INTENT_MARKERS = [
+    "sekarang", "saat ini", "lagi", "berarti", "menonjol", "dominan",
+    "paling", "berapa", "rata-rata", "rerata", "skor", "jumlah", "total",
+    "terbanyak", "tertinggi", "terendah", "statistik", "tren",
+    "kondisi kulit", "masalah kulit",
+]
+
 # Pertanyaan soal HASIL scan sendiri (bukan pengertian konsep) — glosarium
 # tidak boleh merebutnya; biarkan jatuh ke cabang data scan.
 _OWN_RESULT_MARKERS = ["hasil scan", "hasil cek", "scan terakhir", "terakhir saya", "skor saya", "skor aku"]
@@ -1853,6 +1878,14 @@ def _glossary_answer(msg_lower: str):
     if not _is_definition_question(msg_lower):
         return None
     if any(w in msg_lower for w in _OWN_RESULT_MARKERS):
+        return None
+    # Pertanyaan DATA bukan pengertian: ada penanda niat data ("sekarang",
+    # "berarti", "menonjol", ...) tanpa frasa definisi eksplisit ("apa itu",
+    # "jelaskan", ...) — glosarium tidak boleh merebutnya, biarkan jatuh ke
+    # cabang data (tren/retriever) yang menjawab dari angka sebenarnya.
+    if any(w in msg_lower for w in _DATA_INTENT_MARKERS) and not any(
+        t in msg_lower for t in _STRONG_DEFINITION_TRIGGERS
+    ):
         return None
     matched = _match_glossary(msg_lower)
     if not matched:
@@ -2678,16 +2711,42 @@ class AIOrchestrator:
                 oi_v = round(getattr(avg_m, 'oily', 0) or 0, 1)
                 sp_v = round(getattr(avg_m, 'dark_spots', 0) or 0, 1)
                 wr_v = round(getattr(avg_m, 'wrinkles', 0) or 0, 1)
-                return (
-                    f"**Statistik Tren Penyakit & Kondisi Kulit (Database Platform):**\n"
-                    f"• Total Analisis Scan Selesai: {tot_v} data\n"
-                    f"• Rerata Skor Kesehatan Keseluruhan: {ov_v}/100\n"
-                    f"• Rerata Tingkat Jerawat (Acne): {ac_v}/100 (Kondisi tertinggi/paling banyak dialami)\n"
-                    f"• Rerata Kulit Kering (Dry): {dr_v}/100\n"
-                    f"• Rerata Kulit Berminyak (Oily): {oi_v}/100\n"
-                    f"• Rerata Noda Hitam & Flek: {sp_v}/100\n"
-                    f"• Rerata Kerutan / Tekstur: {wr_v}/100"
-                )
+                if tot_v == 0:
+                    return "Belum ada scan yang selesai dianalisis, jadi belum ada tren kondisi kulit yang bisa dihitung."
+                # Kondisi tertinggi DIHITUNG dari 5 rata-rata saat pertanyaan
+                # masuk — label "tertinggi" hanya menempel di baris yang
+                # memang tertinggi. (2026-11-14) Sebelumnya label itu
+                # HARDCODED di baris jerawat, padahal yang tertinggi justru
+                # berminyak — jawabannya bertentangan dengan angkanya sendiri.
+                conditions = [
+                    ("Tingkat Jerawat (Acne)", "jerawat", ac_v),
+                    ("Kulit Kering (Dry)", "kulit kering", dr_v),
+                    ("Kulit Berminyak (Oily)", "kulit berminyak", oi_v),
+                    ("Noda Hitam & Flek", "noda hitam & flek", sp_v),
+                    ("Kerutan / Tekstur", "kerutan", wr_v),
+                ]
+                top_v = max(v for _, _, v in conditions)
+                top = [(label, name, v) for label, name, v in conditions if v == top_v]
+                lines = [
+                    "**Statistik Tren Penyakit & Kondisi Kulit (Database Platform):**",
+                    f"• Total Analisis Scan Selesai: {tot_v} data",
+                    f"• Rerata Skor Kesehatan Keseluruhan: {ov_v}/100",
+                ]
+                for label, _name, v in conditions:
+                    suffix = " (Kondisi tertinggi/paling banyak dialami)" if v == top_v else ""
+                    lines.append(f"• Rerata {label}: {v}/100{suffix}")
+                if len(top) == 1:
+                    lines.append(
+                        f"\nYang paling menonjol saat ini adalah {top[0][1]}, "
+                        f"rata-rata {top[0][2]}/100 — paling tinggi di antara 5 kondisi."
+                    )
+                else:
+                    names = ", ".join(name for _, name, _ in top)
+                    lines.append(
+                        f"\nYang paling menonjol saat ini ada {len(top)} kondisi "
+                        f"dengan rata-rata yang sama ({top_v}/100): {names}."
+                    )
+                return "\n".join(lines)
 
             # 3. Coding / Fixing Website / General Software Engineering (Zero Restrictions for Admin)
             # NOTE: kata umum seperti "website"/"database" sengaja TIDAK masuk
