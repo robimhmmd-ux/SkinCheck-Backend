@@ -562,18 +562,15 @@ class ContextBuilder:
             active_users = db.query(User).filter(User.status == "active").count()
             active_customers = db.query(User).filter(User.role == "customer", User.status == "active").count()
             inactive_users = total_users - active_users
-            # Daftar LENGKAP (bukan hanya 8 terbaru): jalur pintar harus melihat
-            # semua nama — kalau tidak, model menyebut sebagian lalu MENGARANG
-            # saat diminta daftar lengkap (insiden 2026-11-14 01:51). Cap 50
-            # baris + catatan jujur kalau total melebihi cap.
-            _USER_LIST_CAP = 50
-            all_users = db.query(User).order_by(User.created_at.desc()).limit(_USER_LIST_CAP).all()
-            _users_shown = len(all_users)
-            _users_note = (
-                f" (menampilkan {_users_shown} terbaru dari total {total_users})"
-                if total_users > _users_shown
-                else " (LENGKAP — semua pengguna ada di daftar ini, jangan mengarang tambahan)"
-            )
+            # Daftar LENGKAP TANPA BATAS (2026-11-14, permintaan roboy):
+            # jalur pintar harus melihat semua nama — kalau tidak, model
+            # menyebut sebagian lalu MENGARANG saat diminta daftar lengkap
+            # (insiden 2026-11-14 01:51). Tidak ada cap: pada skala sekarang
+            # (10 pengguna) prompt tetap kecil; kalau suatu hari datanya
+            # ribuan, langkah berikutnya adalah query-on-demand, bukan cap
+            # diam-diam di sini.
+            all_users = db.query(User).order_by(User.created_at.desc()).all()
+            _users_note = " (LENGKAP — semua pengguna ada di daftar ini, jangan mengarang tambahan)"
             user_list_str = "\n".join([
                 f"  • ID #{u.id} | {u.name} | {u.email} | Role: {u.role} | Status: {u.status} | Terdaftar: {u.created_at.strftime('%d-%m-%Y %H:%M')}"
                 for u in all_users
@@ -584,19 +581,28 @@ class ContextBuilder:
             scans_today = db.query(SkinScan).filter(func.date(SkinScan.created_at) == today).count()
             completed_scans = db.query(SkinScan).filter(SkinScan.status == "completed").count()
             failed_scans = db.query(SkinScan).filter(SkinScan.status == "failed").count()
-            # Daftar LENGKAP (bukan hanya 5 terbaru) + nama pemilik tiap scan —
-            # tanpa nama pemilik, model tidak bisa menjawab "scan siapa".
-            _SCAN_LIST_CAP = 50
-            all_scans = db.query(SkinScan).order_by(SkinScan.created_at.desc()).limit(_SCAN_LIST_CAP).all()
-            _scans_shown = len(all_scans)
-            _scans_note = (
-                f" (menampilkan {_scans_shown} terbaru dari total {total_scans})"
-                if total_scans > _scans_shown
-                else " (LENGKAP — semua scan ada di daftar ini, jangan mengarang tambahan)"
-            )
+            # Daftar LENGKAP TANPA BATAS + HASIL tiap scan (2026-11-14,
+            # permintaan roboy): tiap baris memuat hasil analisisnya
+            # (overall + ke-5 skor kondisi) karena pertanyaan tren butuh
+            # hasil scan, bukan cuma daftar scan. Agregat tren (bagian 4)
+            # tetap dihitung SQL atas SEMUA baris, tanpa limit.
+            all_scans = db.query(SkinScan).order_by(SkinScan.created_at.desc()).all()
+            _scans_note = " (LENGKAP — semua scan ada di daftar ini, jangan mengarang tambahan)"
             _owner_names = {uid: nm for uid, nm in db.query(User.id, User.name).all()}
+            _scan_results = {r.skin_scan_id: r for r in db.query(AnalysisResult).all()}
+
+            def _scan_scores_str(s):
+                r = _scan_results.get(s.id)
+                if not r:
+                    return "Hasil: belum ada analisis"
+                return (
+                    f"Hasil: overall {r.overall_score}/100 | Jerawat {r.acne_score} | "
+                    f"Kering {r.dry_skin_score} | Berminyak {r.oily_skin_score} | "
+                    f"Dark spots {r.dark_spots_score} | Kerutan {r.wrinkles_score}"
+                )
+
             scan_list_str = "\n".join([
-                f"  • Scan #{s.id} | Pemilik: {_owner_names.get(s.user_id, f'User #{s.user_id}')} (User ID: #{s.user_id}) | Status: {s.status} | Kualitas: {s.image_quality_score or '-'} | Waktu: {s.created_at.strftime('%d-%m-%Y %H:%M')}"
+                f"  • Scan #{s.id} | Pemilik: {_owner_names.get(s.user_id, f'User #{s.user_id}')} (User ID: #{s.user_id}) | Status: {s.status} | Kualitas: {s.image_quality_score or '-'} | Waktu: {s.created_at.strftime('%d-%m-%Y %H:%M')} | {_scan_scores_str(s)}"
                 for s in all_scans
             ])
 
@@ -760,13 +766,11 @@ class ContextBuilder:
                 [("acne", "Jerawat"), ("dry", "Dehidrasi"), ("oily", "Minyak"), ("dark_spots", "Dark spots"), ("wrinkles", "Fine lines")]
             )
 
-            # Kalimat kelengkapan eksplisit: supaya model tahu daftar pengguna
-            # dan scan di bawah ini lengkap (atau dibatasi jujur) dan tidak
-            # mengarang entri tambahan saat diminta daftar lengkap.
+            # Kalimat kelengkapan eksplisit: daftar pengguna dan scan di
+            # bawah ini lengkap TANPA BATAS — model tahu tidak ada yang
+            # disembunyikan dan tidak boleh mengarang entri tambahan.
             _complete_note = (
-                "PENTING: daftar pengguna (bagian 2) dan daftar scan (bagian 3) di bawah ini adalah daftar LENGKAP — setiap nama/ID yang ada di database tercantum di sini. Kalau diminta \"sebutin seluruh pengguna/scan\", sebutkan SEMUA entri dari daftar ini; jangan menambah entri karangan dan jangan mengaku ada yang \"belum tercantum\"."
-                if total_users <= _USER_LIST_CAP and total_scans <= _SCAN_LIST_CAP
-                else f"PENTING: daftar pengguna dan scan di bawah ini DIBATASI 50 entri terbaru (total pengguna {total_users}, total scan {total_scans}) — sebutkan hanya entri yang ada di daftar, sebutkan totalnya dengan jujur, dan jangan mengarang entri tambahan."
+                "PENTING: daftar pengguna (bagian 2) dan daftar scan (bagian 3) di bawah ini adalah daftar LENGKAP TANPA BATAS — setiap nama/ID yang ada di database tercantum di sini, dan setiap scan tercantum beserta HASIL analisisnya (skor overall + ke-5 skor kondisi). Kalau diminta \"sebutin seluruh pengguna/scan\", sebutkan SEMUA entri dari daftar ini; jangan menambah entri karangan dan jangan mengaku ada yang \"belum tercantum\"."
             )
 
             return f"""
@@ -976,32 +980,90 @@ def _setting_int(db: Session, key: str, default: int) -> int:
 
 NVIDIA_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.1-8b-instruct"
+GROQ_DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+
+# Provider AI yang didukung (2026-11-14): gemini (Google AI Studio) +
+# tiga provider OpenAI-compatible (NVIDIA, Groq, DeepSeek) yang semuanya
+# memakai endpoint /chat/completions yang sama. Konfigurasi per provider:
+# key_setting = kunci secret di system_settings, model_setting = nama
+# model, base_url_setting = alamat endpoint (bisa di-override admin;
+# override dipakai juga untuk mengarahkan ke stub saat tes lokal).
+OPENAI_COMPATIBLE_PROVIDERS = {
+    "nvidia": {
+        "label": "NVIDIA",
+        "key_setting": "NVIDIA_API_KEY",
+        "model_setting": "AI_MODEL_NVIDIA",
+        "model_default": NVIDIA_DEFAULT_MODEL,
+        "base_url_setting": "AI_NVIDIA_BASE_URL",
+        "base_url_default": NVIDIA_DEFAULT_BASE_URL,
+        "models_url": "https://integrate.api.nvidia.com/v1/models",
+    },
+    "groq": {
+        "label": "Groq",
+        "key_setting": "GROQ_API_KEY",
+        "model_setting": "AI_MODEL_GROQ",
+        "model_default": GROQ_DEFAULT_MODEL,
+        "base_url_setting": "AI_GROQ_BASE_URL",
+        "base_url_default": GROQ_DEFAULT_BASE_URL,
+        "models_url": "https://api.groq.com/openai/v1/models",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "key_setting": "DEEPSEEK_API_KEY",
+        "model_setting": "AI_MODEL_DEEPSEEK",
+        "model_default": DEEPSEEK_DEFAULT_MODEL,
+        "base_url_setting": "AI_DEEPSEEK_BASE_URL",
+        "base_url_default": DEEPSEEK_DEFAULT_BASE_URL,
+        "models_url": "https://api.deepseek.com/v1/models",
+    },
+}
+
+AI_PROVIDERS = ("gemini", "nvidia", "groq", "deepseek")
 
 
 def _get_provider(db: Session) -> str:
-    """Provider AI aktif dari database. Nilai di luar gemini/nvidia
+    """Provider AI aktif dari database. Nilai di luar allowlist
     diperlakukan sebagai gemini (aman)."""
     p = (SystemSetting.get_value(db, "AI_PROVIDER", "gemini") or "gemini").strip().lower()
-    return p if p in ("gemini", "nvidia") else "gemini"
+    return p if p in AI_PROVIDERS else "gemini"
 
 
-def _call_nvidia_chat(db: Session, prompt_input: str) -> Optional[str]:
-    """Satu panggilan chat ke endpoint OpenAI-compatible NVIDIA, dengan
-    prompt rakitan yang SAMA PERSIS seperti yang diterima Gemini (hasil
-    _build_prompt) supaya kedua provider tidak pernah menyimpang.
-    Mengembalikan teks jawaban, atau None bila apa pun gagal — pemanggil
-    wajib jatuh ke fallback lokal (chat tidak pernah 500 gara-gara ini)."""
-    nvidia_key = (SystemSetting.get_value(db, "NVIDIA_API_KEY", "") or "").strip()
-    if not nvidia_key:
+def _openai_compatible_config(db: Session, provider: str):
+    """(api_key, base_url, model) untuk provider OpenAI-compatible, atau
+    None bila provider tidak dikenal / kuncinya kosong."""
+    cfg = OPENAI_COMPATIBLE_PROVIDERS.get(provider)
+    if not cfg:
+        return None
+    api_key = (SystemSetting.get_value(db, cfg["key_setting"], "") or "").strip()
+    if not api_key:
         return None
     base_url = (
-        SystemSetting.get_value(db, "AI_NVIDIA_BASE_URL", NVIDIA_DEFAULT_BASE_URL)
-        or NVIDIA_DEFAULT_BASE_URL
-    ).strip().rstrip("/") or NVIDIA_DEFAULT_BASE_URL
+        SystemSetting.get_value(db, cfg["base_url_setting"], cfg["base_url_default"])
+        or cfg["base_url_default"]
+    ).strip().rstrip("/") or cfg["base_url_default"]
     model = (
-        SystemSetting.get_value(db, "AI_MODEL_NVIDIA", NVIDIA_DEFAULT_MODEL)
-        or NVIDIA_DEFAULT_MODEL
-    ).strip() or NVIDIA_DEFAULT_MODEL
+        SystemSetting.get_value(db, cfg["model_setting"], cfg["model_default"])
+        or cfg["model_default"]
+    ).strip() or cfg["model_default"]
+    return api_key, base_url, model
+
+
+def _call_openai_compatible_chat(db: Session, provider: str, prompt_input: str) -> Optional[str]:
+    """Satu panggilan chat ke endpoint OpenAI-compatible (NVIDIA/Groq/
+    DeepSeek), dengan prompt rakitan yang SAMA PERSIS seperti yang diterima
+    Gemini (hasil _build_prompt) supaya semua provider tidak pernah
+    menyimpang. Mengembalikan teks jawaban, atau None bila apa pun gagal
+    — pemanggil wajib jatuh ke fallback lokal (chat tidak pernah 500
+    gara-gara ini)."""
+    cfg = OPENAI_COMPATIBLE_PROVIDERS.get(provider)
+    label = cfg["label"] if cfg else provider
+    conf = _openai_compatible_config(db, provider)
+    if not conf:
+        return None
+    api_key, base_url, model = conf
     temp_val = _setting_float(db, "AI_TEMPERATURE", 0.7)
     max_tokens_val = min(_setting_int(db, "AI_MAX_TOKENS", 4096), 1024)
     try:
@@ -1009,7 +1071,7 @@ def _call_nvidia_chat(db: Session, prompt_input: str) -> Optional[str]:
 
         resp = httpx.post(
             f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {nvidia_key}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
                 "model": model,
                 "messages": [{"role": "user", "content": prompt_input}],
@@ -1019,7 +1081,7 @@ def _call_nvidia_chat(db: Session, prompt_input: str) -> Optional[str]:
             timeout=30.0,
         )
         if resp.status_code != 200:
-            logger.info(f"NVIDIA chat gagal (HTTP {resp.status_code}).")
+            logger.info(f"{label} chat gagal (HTTP {resp.status_code}).")
             return None
         choices = resp.json().get("choices", [])
         if not choices:
@@ -1027,8 +1089,106 @@ def _call_nvidia_chat(db: Session, prompt_input: str) -> Optional[str]:
         content = (choices[0].get("message", {}).get("content") or "").strip()
         return content or None
     except Exception as e:  # noqa: BLE001
-        logger.info(f"NVIDIA chat error: {e}.")
+        logger.info(f"{label} chat error: {e}.")
         return None
+
+
+def _call_nvidia_chat(db: Session, prompt_input: str) -> Optional[str]:
+    """Kompatibilitas mundur: NVIDIA kini lewat helper generik di atas."""
+    return _call_openai_compatible_chat(db, "nvidia", prompt_input)
+
+
+# ── Auto-deteksi provider dari API key (2026-11-14) ──
+# Endpoint /settings/detect-provider mencoba key ke /models tiap provider.
+# Hanya HTTP 200 yang dihitung cocok. Urutan: petunjuk format key dulu
+# (gsk_ = Groq, nvapi- = NVIDIA, AIza = Gemini, sk- = DeepSeek), lalu
+# sisanya dengan urutan tetap groq → deepseek → nvidia → gemini. Urutan
+# TIDAK bisa salah mengenali: satu key praktis hanya valid di satu
+# provider, dan provider lain menjawab 401. Key TIDAK PERNAH disimpan
+# atau di-log — hanya dipakai di memori selama deteksi.
+_DETECT_TIMEOUT = 8.0
+_DETECT_ORDER = ("groq", "deepseek", "nvidia", "gemini")
+_DETECT_KEY_PREFIXES = (
+    ("gsk_", "groq"),
+    ("nvapi-", "nvidia"),
+    ("AIza", "gemini"),
+    ("sk-", "deepseek"),
+)
+_GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
+def _detect_provider_order(api_key: str):
+    """Urutan pengecekan: provider yang cocok dengan format key dulu."""
+    first = None
+    for prefix, provider in _DETECT_KEY_PREFIXES:
+        if api_key.startswith(prefix):
+            first = provider
+            break
+    order = [first] if first else []
+    order += [p for p in _DETECT_ORDER if p != first]
+    return order
+
+
+def _detect_models_url(provider: str, url_overrides=None) -> str:
+    """URL list-model provider; override dipakai HANYA untuk tes lokal
+    (stub) lewat env DETECT_<PROVIDER>_MODELS_URL — di production env
+    itu kosong dan selalu dipakai URL asli tiap provider."""
+    if url_overrides and url_overrides.get(provider):
+        return url_overrides[provider]
+    if provider == "gemini":
+        return _GEMINI_MODELS_URL
+    return OPENAI_COMPATIBLE_PROVIDERS[provider]["models_url"]
+
+
+def detect_provider_from_key(api_key: str, timeout: float = _DETECT_TIMEOUT, url_overrides=None):
+    """Coba api_key ke /models tiap provider. Kembalikan
+    (provider, models, error): provider = nama provider pertama yang
+    menjawab 200 + daftar nama modelnya; kalau tidak ada yang cocok,
+    provider None + pesan error yang jelas. Key tidak disimpan/di-log."""
+    import httpx
+
+    key = (api_key or "").strip()
+    if not key:
+        return None, [], "api_key wajib diisi."
+    last_error = "Tidak ada provider yang mengenali kunci ini."
+    for provider in _detect_provider_order(key):
+        url = _detect_models_url(provider, url_overrides)
+        try:
+            if provider == "gemini":
+                resp = httpx.get(f"{url}?key={key}", timeout=timeout)
+            else:
+                resp = httpx.get(url, headers={"Authorization": f"Bearer {key}"}, timeout=timeout)
+        except Exception as e:  # noqa: BLE001
+            logger.info(f"Detect provider {provider} gagal dijangkau: {e}.")
+            last_error = f"{provider}: tidak dapat dijangkau ({e})."
+            continue
+        if resp.status_code != 200:
+            logger.info(f"Detect provider {provider} menolak key (HTTP {resp.status_code}).")
+            last_error = f"{provider}: kunci ditolak (HTTP {resp.status_code})."
+            continue
+        try:
+            data = resp.json()
+        except Exception:  # noqa: BLE001
+            last_error = f"{provider}: respons bukan JSON."
+            continue
+        if provider == "gemini":
+            models = [
+                (m.get("name") or "").removeprefix("models/")
+                for m in data.get("models", [])
+                if "generateContent" in (m.get("supportedGenerationMethods") or [])
+                and (m.get("name") or "").strip()
+            ]
+        else:
+            models = [
+                (item.get("id") or "").strip()
+                for item in data.get("data", [])
+                if (item.get("id") or "").strip()
+            ]
+        if not models:
+            last_error = f"{provider}: tidak ada model yang tersedia."
+            continue
+        return provider, models, None
+    return None, [], last_error
 
 
 # ─────────────────────────────────────────────────────────
@@ -1069,8 +1229,9 @@ _TABLES_TEXT = f"Database aplikasi (TiDB) punya {len(DB_TABLES)} tabel:\n" + "\n
 
 # Pengaturan sistem NON-RAHASIA yang boleh disebut nilainya oleh chatbot.
 # (key, label tampil, penjelasan, nilai default)
-# Kunci rahasia (GEMINI_API_KEY, NVIDIA_API_KEY, FONNTE_TOKEN, WA_API_TOKEN,
-# MAIL_PASSWORD) TIDAK ada di sini — nilainya tidak pernah disebut.
+# Kunci rahasia (GEMINI_API_KEY, NVIDIA_API_KEY, GROQ_API_KEY,
+# DEEPSEEK_API_KEY, FONNTE_TOKEN, WA_API_TOKEN, MAIL_PASSWORD) TIDAK ada
+# di sini — nilainya tidak pernah disebut.
 # Catatan jujur: VGG_THRESHOLD, OTP_MODE, dan REGISTRATION_OTP_MODE tersimpan
 # di database tapi TIDAK dibaca backend yang live (hanya controller lama yang
 # tidak terpakai yang membacanya) — alur registrasi live selalu OTP WhatsApp
@@ -1079,10 +1240,14 @@ SETTINGS_INFO = [
     ("SCAN_DAILY_QUOTA", "Kuota scan harian", "batas berapa kali satu pengguna boleh scan dalam sehari; kosong berarti tanpa batas, dan akun tamu (Tester) tidak dihitung kuotanya", ""),
     ("MAINTENANCE_MODE", "Maintenance mode", "kalau aktif, customer tidak bisa upload scan (admin tetap bisa); scan ditolak dengan pesan layanan sedang perawatan", "off"),
     ("ALLOW_SAME_PHONE_NUMBER", "Nomor WhatsApp boleh dipakai lebih dari satu akun", "kalau aktif, satu nomor WhatsApp boleh dipakai beberapa akun (kode OTP dikirim per nomor); kalau mati, daftar dengan nomor yang sudah dipakai akun lain ditolak", "off"),
-    ("AI_PROVIDER", "Provider AI chatbot", "penyedia AI yang dipakai chatbot: gemini (Google) atau nvidia (model Llama lewat API OpenAI-compatible)", "gemini"),
+    ("AI_PROVIDER", "Provider AI chatbot", "penyedia AI yang dipakai chatbot: gemini (Google), nvidia (model Llama lewat API OpenAI-compatible), groq, atau deepseek (keduanya OpenAI-compatible)", "gemini"),
     ("AI_MODEL", "Model Gemini", "nama model Gemini yang dipakai chatbot", "gemini-3.5-flash-lite"),
     ("AI_MODEL_NVIDIA", "Model NVIDIA", "nama model NVIDIA yang dipakai kalau providernya nvidia", "meta/llama-3.1-8b-instruct"),
+    ("AI_MODEL_GROQ", "Model Groq", "nama model Groq yang dipakai kalau providernya groq", "llama-3.3-70b-versatile"),
+    ("AI_MODEL_DEEPSEEK", "Model DeepSeek", "nama model DeepSeek yang dipakai kalau providernya deepseek", "deepseek-chat"),
     ("AI_NVIDIA_BASE_URL", "Alamat API NVIDIA", "alamat endpoint API NVIDIA (OpenAI-compatible)", "https://integrate.api.nvidia.com/v1"),
+    ("AI_GROQ_BASE_URL", "Alamat API Groq", "alamat endpoint API Groq (OpenAI-compatible)", "https://api.groq.com/openai/v1"),
+    ("AI_DEEPSEEK_BASE_URL", "Alamat API DeepSeek", "alamat endpoint API DeepSeek (OpenAI-compatible)", "https://api.deepseek.com/v1"),
     ("AI_MAX_TOKENS", "Batas panjang jawaban AI", "jumlah token maksimum jawaban chatbot", "1024"),
     ("AI_TEMPERATURE", "Temperatur AI", "seberapa bebas/kreatif jawaban chatbot (0 sampai 2)", "0.7"),
     ("AI_SIMULATION_MODE", "Mode simulasi AI", "kalau aktif, chatbot selalu memakai jawaban lokal dan tidak memanggil provider AI sama sekali", "off"),
@@ -1892,10 +2057,10 @@ APP_GLOSSARY = [
      "Admin adalah pengelola aplikasi: dia bisa melihat dan mengatur pengguna, produk, audit scan, tren kulit, obrolan customer, konfigurasi, dan log aktivitas. Admin juga bisa menangguhkan atau menonaktifkan akun, dan mengubah status verifikasi pengguna."),
     ("Customer", ["customer", "pengguna"],
      "Customer adalah pengguna biasa aplikasi: dia bisa scan kulit, melihat dashboard dan riwayat diagnosisnya, belanja di marketplace, dan chat dengan asisten AI — tapi hanya soal akun dan kulitnya sendiri, bukan data pengguna lain."),
-    ("Provider AI (Gemini / NVIDIA)", ["provider ai", "provider", "model ai", "gemini", "nvidia", "kunci api", "api key", "api keys"],
-     "Chatbot Laomera bisa memakai dua penyedia AI: Gemini (Google) atau NVIDIA (model Llama lewat API yang kompatibel dengan OpenAI). Admin memilihnya di Konfigurasi → tab AI, mengisi kunci API-nya, dan perubahannya langsung berlaku tanpa restart. Kalau kuncinya salah atau providernya mati, chatbot tetap menjawab dari jawaban lokal, bukan error."),
+    ("Provider AI (Gemini / NVIDIA / Groq / DeepSeek)", ["provider ai", "provider", "model ai", "gemini", "nvidia", "groq", "deepseek", "kunci api", "api key", "api keys"],
+     "Chatbot Laomera bisa memakai empat penyedia AI: Gemini (Google), NVIDIA (model Llama lewat API yang kompatibel dengan OpenAI), Groq, atau DeepSeek (keduanya juga OpenAI-compatible). Admin memilihnya di Konfigurasi → tab AI, mengisi kunci API-nya, dan perubahannya langsung berlaku tanpa restart. Kalau kuncinya salah atau providernya mati, chatbot tetap menjawab dari jawaban lokal, bukan error."),
     ("Konfigurasi admin", ["konfigurasi", "pengaturan", "settings"],
-     "Konfigurasi adalah halaman pengaturan admin (menu Konfigurasi) dengan tiga tab: AI (provider Gemini/NVIDIA, kunci API, model, dan kuota), OTP (verifikasi WhatsApp dan aturan nomor), dan Admin (pengaturan akun admin). Perubahan di sana langsung berlaku tanpa restart."),
+     "Konfigurasi adalah halaman pengaturan admin (menu Konfigurasi) dengan tiga tab: AI (provider Gemini/NVIDIA/Groq/DeepSeek, kunci API, model, dan kuota), OTP (verifikasi WhatsApp dan aturan nomor), dan Admin (pengaturan akun admin). Perubahan di sana langsung berlaku tanpa restart."),
     ("Teknologi aplikasi", ["teknologi", "next.js", "nextjs", "fastapi", "vercel", "frontend", "backend", "dibangun dengan", "dibuat dengan"],
      "Aplikasi ini dibangun dengan frontend Next.js dan backend FastAPI, dan di-hosting di Vercel — setiap kali ada perubahan kode yang di-push ke GitHub, websitenya langsung diperbarui otomatis."),
     ("Fitur aplikasi", ["fitur"],
@@ -2105,7 +2270,7 @@ class AIOrchestrator:
         """Assemble the exact prompt chat() used to build inline, so the
         streaming and non-streaming paths cannot drift apart."""
         # Glosarium ringkas (hanya kalau pertanyaannya memang definisi) supaya
-        # jalur pintar (Gemini/NVIDIA) juga bisa menjawab "apa itu ...?" dari
+        # jalur pintar (Gemini/NVIDIA/Groq/DeepSeek) juga bisa menjawab "apa itu ...?" dari
         # pengertian yang sama dengan fallback — tanpa mengubah prompt lain.
         # Deteksi definisi pakai teks yang sudah dinormalisasi tiponya.
         _glossary_hits = _match_glossary(normalize_typos(message)) if _is_definition_question(normalize_typos(message)) else []
@@ -2213,13 +2378,15 @@ class AIOrchestrator:
             yield from self._chunk_sentences(local_resp)
             return
 
-        # Provider NVIDIA: satu panggilan non-streaming, lalu hasilnya
-        # di-chunk seperti pola REST Gemini (tanpa SDK) di bawah.
-        if _get_provider(db) == "nvidia":
+        # Provider OpenAI-compatible (NVIDIA/Groq/DeepSeek): satu panggilan
+        # non-streaming, lalu hasilnya di-chunk seperti pola REST Gemini
+        # (tanpa SDK) di bawah.
+        _provider = _get_provider(db)
+        if _provider in OPENAI_COMPATIBLE_PROVIDERS:
             prompt_input = self._build_prompt(db, user_id, message, scan_id, role, history_str, rag_docs)
-            full = _call_nvidia_chat(db, prompt_input)
+            full = _call_openai_compatible_chat(db, _provider, prompt_input)
             if not full:
-                logger.warning("NVIDIA stream tidak menjawab; fallback lokal.")
+                logger.warning(f"{OPENAI_COMPATIBLE_PROVIDERS[_provider]['label']} stream tidak menjawab; fallback lokal.")
                 full = self._generate_local_response(message, db, rag_docs, user_id=user_id, role=role)
             full = SafetyLayer.post_filter(full, is_pure_greeting=is_pure_greeting)
             self._save_history(user_id, message, full, db)
@@ -2355,15 +2522,16 @@ class AIOrchestrator:
             self._save_history(user_id, message, local_resp, db)
             return local_resp
 
-        # 4a. Provider NVIDIA: satu panggilan OpenAI-compatible dengan
-        # prompt rakitan yang sama seperti Gemini. Gagal apa pun (kunci
-        # kosong, endpoint mati, respons kosong) -> fallback lokal,
-        # tidak pernah 500.
-        if _get_provider(db) == "nvidia":
+        # 4a. Provider OpenAI-compatible (NVIDIA/Groq/DeepSeek): satu
+        # panggilan dengan prompt rakitan yang sama seperti Gemini. Gagal
+        # apa pun (kunci kosong, endpoint mati, respons kosong) ->
+        # fallback lokal, tidak pernah 500.
+        _provider = _get_provider(db)
+        if _provider in OPENAI_COMPATIBLE_PROVIDERS:
             prompt_input = self._build_prompt(db, user_id, message, scan_id, role, chat_history_str, rag_docs)
-            ai_text = _call_nvidia_chat(db, prompt_input)
+            ai_text = _call_openai_compatible_chat(db, _provider, prompt_input)
             if not ai_text:
-                logger.warning("NVIDIA tidak menjawab; fallback lokal.")
+                logger.warning(f"{OPENAI_COMPATIBLE_PROVIDERS[_provider]['label']} tidak menjawab; fallback lokal.")
                 ai_text = self._generate_local_response(message, db, rag_docs, user_id=user_id, role=role)
             ai_text = SafetyLayer.post_filter(ai_text, is_pure_greeting=is_pure_greeting)
             self._save_history(user_id, message, ai_text, db)

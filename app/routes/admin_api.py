@@ -30,6 +30,7 @@ Adaptasi yang sengaja dipilih (bukan port mentah):
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Union
@@ -1068,15 +1069,21 @@ SETTING_DEFS = [
     ("AI_MAX_TOKENS", "1024", False),
     ("AI_TEMPERATURE", "0.7", False),
     ("AI_SIMULATION_MODE", "off", False),
-    # Provider AI (2026-11-13): "gemini" (Google AI Studio) atau "nvidia"
-    # (endpoint OpenAI-compatible NVIDIA). AI_MODEL = model Gemini,
-    # AI_MODEL_NVIDIA = model NVIDIA. Aturan jawaban (system prompt) TIDAK
-    # lagi di database — aturan bawaan di kode (CUSTOMER/ADMIN_SYSTEM_PROMPT
-    # di app/services/ai_assistant_service.py), didokumentasikan di
+    # Provider AI (2026-11-13, tambah Groq/DeepSeek 2026-11-14): "gemini"
+    # (Google AI Studio) atau "nvidia"/"groq"/"deepseek" (endpoint
+    # OpenAI-compatible). AI_MODEL = model Gemini, AI_MODEL_NVIDIA =
+    # model NVIDIA, AI_MODEL_GROQ = model Groq, AI_MODEL_DEEPSEEK = model
+    # DeepSeek. Aturan jawaban (system prompt) TIDAK lagi di database —
+    # aturan bawaan di kode (CUSTOMER/ADMIN_SYSTEM_PROMPT di
+    # app/services/ai_assistant_service.py), didokumentasikan di
     # docs/aturan-jawaban-ai.md.
     ("AI_PROVIDER", "gemini", False),
     ("AI_MODEL_NVIDIA", "meta/llama-3.1-8b-instruct", False),
+    ("AI_MODEL_GROQ", "llama-3.3-70b-versatile", False),
+    ("AI_MODEL_DEEPSEEK", "deepseek-chat", False),
     ("AI_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1", False),
+    ("AI_GROQ_BASE_URL", "https://api.groq.com/openai/v1", False),
+    ("AI_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1", False),
     ("SCAN_DAILY_QUOTA", "", False),  # kosong = tanpa batas (default aman)
     ("OTP_MODE", "", False),
     # REGISTRATION_OTP_MODE (2026-11-12): KUNCI INI WAJIB ADA — frontend tab
@@ -1091,6 +1098,8 @@ SETTING_DEFS = [
     ("VGG_THRESHOLD", "40", False),
     ("GEMINI_API_KEY", "", True),
     ("NVIDIA_API_KEY", "", True),
+    ("GROQ_API_KEY", "", True),
+    ("DEEPSEEK_API_KEY", "", True),
     ("FONNTE_TOKEN", "", True),
     ("WA_API_TOKEN", "", True),
     ("MAIL_USERNAME", "", False),
@@ -1207,10 +1216,18 @@ async def admin_patch_settings(
             if not text:
                 return JSONResponse(status_code=400, content={"detail": "AI_MODEL_NVIDIA tidak boleh kosong."})
             normalized[key] = text
+        elif key == "AI_MODEL_GROQ":
+            if not text:
+                return JSONResponse(status_code=400, content={"detail": "AI_MODEL_GROQ tidak boleh kosong."})
+            normalized[key] = text
+        elif key == "AI_MODEL_DEEPSEEK":
+            if not text:
+                return JSONResponse(status_code=400, content={"detail": "AI_MODEL_DEEPSEEK tidak boleh kosong."})
+            normalized[key] = text
         elif key == "AI_PROVIDER":
             low = text.lower()
-            if low not in ("gemini", "nvidia"):
-                return JSONResponse(status_code=400, content={"detail": "AI_PROVIDER harus 'gemini' atau 'nvidia'."})
+            if low not in ("gemini", "nvidia", "groq", "deepseek"):
+                return JSONResponse(status_code=400, content={"detail": "AI_PROVIDER harus 'gemini', 'nvidia', 'groq', atau 'deepseek'."})
             normalized[key] = low
         elif key == "AI_TEMPERATURE":
             try:
@@ -1291,31 +1308,33 @@ async def admin_test_db(request: Request, db: Session = Depends(get_db)):
 async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
     admin = _require_admin(request)
     t0 = time.time()
-    # Mengetes provider yang AKTIF (AI_PROVIDER): nvidia -> endpoint
-    # OpenAI-compatible NVIDIA; gemini -> seperti sebelumnya.
+    # Mengetes provider yang AKTIF (AI_PROVIDER): nvidia/groq/deepseek ->
+    # endpoint OpenAI-compatible masing-masing; gemini -> seperti sebelumnya.
     provider = (SystemSetting.get_value(db, "AI_PROVIDER", "gemini") or "gemini").strip().lower()
-    if provider not in ("gemini", "nvidia"):
+    if provider not in ("gemini", "nvidia", "groq", "deepseek"):
         provider = "gemini"
-    if provider == "nvidia":
+    if provider in ("nvidia", "groq", "deepseek"):
         from app.services.ai_assistant_service import (
-            _call_nvidia_chat,
-            NVIDIA_DEFAULT_MODEL,
+            OPENAI_COMPATIBLE_PROVIDERS,
+            _call_openai_compatible_chat,
         )
 
-        model_name = (SystemSetting.get_value(db, "AI_MODEL_NVIDIA", NVIDIA_DEFAULT_MODEL) or NVIDIA_DEFAULT_MODEL).strip() or NVIDIA_DEFAULT_MODEL
-        nvidia_key = (SystemSetting.get_value(db, "NVIDIA_API_KEY", "") or "").strip()
-        if not nvidia_key:
+        cfg = OPENAI_COMPATIBLE_PROVIDERS[provider]
+        label = cfg["label"]
+        model_name = (SystemSetting.get_value(db, cfg["model_setting"], cfg["model_default"]) or cfg["model_default"]).strip() or cfg["model_default"]
+        api_key = (SystemSetting.get_value(db, cfg["key_setting"], "") or "").strip()
+        if not api_key:
             return JSONResponse(
                 content={
                     "ok": False,
                     "latency_ms": 0,
                     "model": model_name,
-                    "provider": "nvidia",
-                    "detail": "NVIDIA_API_KEY belum disetel.",
+                    "provider": provider,
+                    "detail": f"{cfg['key_setting']} belum disetel.",
                 }
             )
-        sample = _call_nvidia_chat(
-            db, "Katakan 'Koneksi AI SkinCheck Berhasil' dalam satu kalimat."
+        sample = _call_openai_compatible_chat(
+            db, provider, "Katakan 'Koneksi AI SkinCheck Berhasil' dalam satu kalimat."
         )
         latency_ms = round((time.time() - t0) * 1000, 1)
         if not sample:
@@ -1324,21 +1343,21 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
                     "ok": False,
                     "latency_ms": latency_ms,
                     "model": model_name,
-                    "provider": "nvidia",
-                    "detail": "Gagal menghubungi NVIDIA (cek kunci, nama model, dan koneksi).",
+                    "provider": provider,
+                    "detail": f"Gagal menghubungi {label} (cek kunci, nama model, dan koneksi).",
                 }
             )
         _log_activity(
-            db, request, admin["id"], f"Admin menguji koneksi NVIDIA ({model_name}, {latency_ms} ms)"
+            db, request, admin["id"], f"Admin menguji koneksi {label} ({model_name}, {latency_ms} ms)"
         )
         return JSONResponse(
             content={
                 "ok": True,
                 "latency_ms": latency_ms,
                 "model": model_name,
-                "provider": "nvidia",
+                "provider": provider,
                 "sample_output": sample[:500],
-                "detail": f"Koneksi NVIDIA ({model_name}) aktif ({latency_ms} ms).",
+                "detail": f"Koneksi {label} ({model_name}) aktif ({latency_ms} ms).",
             }
         )
     api_key = (SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY) or "").strip()
@@ -1396,6 +1415,45 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
             "sample_output": sample,
             "detail": f"Koneksi Gemini ({model_name}) aktif ({latency_ms} ms).",
         }
+    )
+
+
+class DetectProviderIn(BaseModel):
+    api_key: str = ""
+
+
+@router.post("/settings/detect-provider")
+async def admin_detect_provider(request: Request, body: DetectProviderIn, db: Session = Depends(get_db)):
+    """Auto-deteksi provider dari satu API key (tanpa menyimpan key).
+
+    Mencoba key ke endpoint list-model tiap provider (Gemini, NVIDIA,
+    Groq, DeepSeek); provider pertama yang menjawab 200 + daftar
+    modelnya dikembalikan. Key HANYA dipakai di memori selama deteksi:
+    tidak disimpan ke database, tidak di-log, tidak dikembalikan ke
+    client. Urutan pengecekan: petunjuk format key dulu, lalu
+    groq → deepseek → nvidia → gemini (lihat detect_provider_from_key
+    di ai_assistant_service).
+    """
+    admin = _require_admin(request)
+    api_key = (body.api_key or "").strip()
+    if not api_key:
+        return JSONResponse(status_code=400, content={"detail": "api_key wajib diisi."})
+    # Override URL list-model — HANYA untuk tes lokal lewat stub (env
+    # DETECT_<PROVIDER>_MODELS_URL); di production env ini kosong dan
+    # selalu dipakai URL asli tiap provider.
+    url_overrides = {
+        p: os.environ.get(f"DETECT_{p.upper()}_MODELS_URL", "")
+        for p in ("gemini", "nvidia", "groq", "deepseek")
+    }
+    url_overrides = {p: u for p, u in url_overrides.items() if u}
+    from app.services.ai_assistant_service import detect_provider_from_key
+
+    provider, models, error = detect_provider_from_key(api_key, url_overrides=url_overrides or None)
+    if provider:
+        _log_activity(db, request, admin["id"], f"Admin mendeteksi provider AI: {provider} ({len(models)} model)")
+        return JSONResponse(content={"provider": provider, "models": models})
+    return JSONResponse(
+        content={"provider": None, "error": error or "Tidak ada provider yang mengenali kunci ini."}
     )
 
 
