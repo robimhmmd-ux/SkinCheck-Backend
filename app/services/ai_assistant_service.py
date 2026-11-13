@@ -46,6 +46,43 @@ def normalize_chat_question(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+# ── Normalisasi typo/singkatan untuk ROUTING (2026-11-14) ──
+# Pertanyaan dengan salah ketik ("siapa syaa") tidak boleh jatuh ke
+# penolakan luar ruang lingkup hanya karena pemicu cabang tidak cocok
+# dengan kata yang diketik. Dipakai HANYA untuk pencocokan cabang
+# (check_input, _generate_local_response, _is_seeking_product, deteksi
+# definisi di _build_prompt) — pesan asli yang disimpan/ditampilkan dan
+# prompt LLM TIDAK diubah. Peta ini taksonomi bahasa Indonesia sehari-hari,
+# bukan data pengguna/produk, jadi bukan "hardcoded" yang dilarang roboy.
+# Semua penggantian hanya sebagai kata utuh (berbatas kata) supaya tidak
+# merusak kata lain ("ga" di dalam "gagal"/"tanggal" tidak tersentuh).
+TYPO_MAP = {
+    "syaa": "saya", "sya": "saya", "sy": "saya",
+    "aq": "aku",
+    "kmu": "kamu", "km": "kamu",
+    "brp": "berapa", "kpn": "kapan", "knp": "kenapa", "knpa": "kenapa",
+    "gimana": "bagaimana", "gmn": "bagaimana", "gmna": "bagaimana",
+    "yg": "yang", "dgn": "dengan", "dg": "dengan",
+    "blm": "belum", "udh": "sudah", "udah": "sudah", "sdh": "sudah",
+    "trs": "terus", "trus": "terus",
+    "jg": "juga", "jga": "juga",
+    "tdk": "tidak", "tak": "tidak", "ga": "tidak", "gak": "tidak",
+    "nggak": "tidak", "ngga": "tidak",
+    "ap": "apa", "sm": "sama",
+    "skrg": "sekarang", "skrng": "sekarang",
+}
+_TYPO_RE = re.compile(
+    r"(?<![a-z])(" + "|".join(sorted(TYPO_MAP, key=len, reverse=True)) + r")(?![a-z])"
+)
+
+
+def normalize_typos(text: str) -> str:
+    """Ganti typo/singkatan Indonesia umum dengan bentuk kanonis, hanya
+    sebagai kata utuh. Masukan dilowercase dulu; keluaran dipakai untuk
+    routing (pencocokan cabang) saja."""
+    return _TYPO_RE.sub(lambda m: TYPO_MAP[m.group(1)], (text or "").lower())
+
+
 def top_customer_questions(db: Session, limit: int = 10):
     """Pertanyaan customer (role=user) yang paling sering diajukan ke
     asisten, dikelompokkan berdasarkan teks yang dinormalisasi.
@@ -185,7 +222,10 @@ class SafetyLayer:
         if role == "admin":
             return None
 
-        lower = message.lower().strip()
+        # (2026-11-14) Normalisasi typo dulu: "siapa syaa" harus lolos
+        # seperti "siapa saya" — kalau tidak, pertanyaan identitas jatuh
+        # ke penolakan di bawah hanya karena salah ketik.
+        lower = normalize_typos(message).strip()
 
         # Check greetings first — never reject warm greetings
         greetings = [
@@ -2006,7 +2046,8 @@ class AIOrchestrator:
         # Glosarium ringkas (hanya kalau pertanyaannya memang definisi) supaya
         # jalur pintar (Gemini/NVIDIA) juga bisa menjawab "apa itu ...?" dari
         # pengertian yang sama dengan fallback — tanpa mengubah prompt lain.
-        _glossary_hits = _match_glossary(message.lower()) if _is_definition_question(message.lower()) else []
+        # Deteksi definisi pakai teks yang sudah dinormalisasi tiponya.
+        _glossary_hits = _match_glossary(normalize_typos(message)) if _is_definition_question(normalize_typos(message)) else []
         glossary_text = "\n".join(f"- **{t}:** {x}" for t, x in _glossary_hits) if _glossary_hits else ""
         if role == "admin":
             admin_row = db.query(User).filter(User.id == user_id).first()
@@ -2374,7 +2415,7 @@ class AIOrchestrator:
 
     def _is_seeking_product(self, message: str) -> bool:
         """Determines if the user is explicitly seeking product recommendations, active ingredients, or purchase links."""
-        msg_lower = message.lower()
+        msg_lower = normalize_typos(message)
         product_indicators = [
             "rekomendasi", "rekomendasikan", "produk", "skincare", "beli", "link",
             "shopee", "tokopedia", "store", "toko", "merk", "brand", "cari",
@@ -2581,7 +2622,10 @@ class AIOrchestrator:
 
     def _generate_local_response(self, message: str, db: Session, rag_docs: List[dict], user_id: Optional[int] = None, role: str = "customer") -> str:
         """Intelligent local fallback matcher respecting role (Admin vs Customer) and to-the-point guidance."""
-        msg_lower = message.lower()
+        # (2026-11-14) Normalisasi typo di SATU tempat ini: semua cabang
+        # admin/customer, glosarium, dan retriever di bawah memakai
+        # msg_lower yang sama, jadi semuanya ikut kebal typo.
+        msg_lower = normalize_typos(message)
 
         # ─────────────────────────────────────────────────────
         # ADMIN LOCAL QUERIES (Zero restrictions: Coding, DB, Customer Chat Analysis, Disease Trends)
