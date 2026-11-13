@@ -496,7 +496,20 @@ async def register(request: Request, payload: RegisterIn, db: Session = Depends(
 
 
 @router.post("/auth/logout")
-async def logout(request: Request):
+async def logout(request: Request, db: Session = Depends(get_db)):
+    # Hapus riwayat chatbot saat logout (roboy 2026-11-13): berlaku untuk
+    # admin maupun customer, lewat jalur logout mana pun (sidebar, profil,
+    # header) — penghapusan dijamin di server, bukan di pemanggil frontend.
+    # Kegagalan hapus tidak boleh menggagalkan logout.
+    user = _session_user(request)
+    if user:
+        try:
+            from app.models.chat_message import ChatMessage
+
+            db.query(ChatMessage).filter(ChatMessage.user_id == user["id"]).delete()
+            db.commit()
+        except Exception:
+            db.rollback()
     request.session.clear()
     return JSONResponse(content={"status": "ok"})
 
