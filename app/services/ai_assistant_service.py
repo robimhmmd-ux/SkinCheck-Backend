@@ -168,7 +168,7 @@ class SafetyLayer:
 
     SKIN_KEYWORDS = [
         "kulit", "wajah", "muka", "jerawat", "acne", "komedo", "pori", "sebum",
-        "minyak", "kering", "kusam", "flek", "noda", "spots", "kerutan", "wrinkle", "garis halus",
+        "minyak", "kering", "kusam", "flek", "noda", "kerutan", "wrinkle", "garis halus",
         "sunscreen", "tabir surya", "spf", "uv", "skincare", "serum", "toner",
         "moisturizer", "pelembap", "cleanser", "sabun", "cuci muka", "niacinamide",
         "salicylic", "retinol", "ceramide", "hyaluronic", "centella", "cica",
@@ -1623,19 +1623,6 @@ class AIOrchestrator:
         question_words = ["cenderung", "kondisi", "gimana", "bagaimana", "fokus", "dominan", "jenis", "ke arah", "lebih", "apa", "kenapa", "mengapa", "sehat", "skor", "berapa"]
         return any(w in msg_lower for w in question_words) or self._wants_advice(msg_lower)
 
-    def _is_condition_knowledge_question(self, msg_lower: str) -> bool:
-        """Pertanyaan PENGETAHUAN soal satu kondisi kulit ('apa penyebab
-        jerawat', 'kulit saya kering banget kenapa', 'gimana cara ngilangin
-        dark spots') — dijawab dokumen RAG, BUKAN skor rata-rata user
-        (cabang 5). Bukan pertanyaan soal data sendiri: kalau ada kata
-        skor/rata-rata/berapa/hasil scan, tetap cabang 5."""
-        knowledge_words = ["penyebab", "kenapa", "mengapa", "apa itu", "ngilangin", "ngatasin", "menghilangkan", "cara menghilangkan", "apa bedanya", "faktor", "timbul", "akibat"]
-        if not any(w in msg_lower for w in knowledge_words):
-            return False
-        if any(w in msg_lower for w in ["skor", "rata-rata", "rata rata", "rerata", "berapa", "hasil scan", "hasil cek", "persen", "persentase", "grafik", "dashboard"]):
-            return False
-        return any(w in msg_lower for w in ["jerawat", "acne", "minyak", "oily", "sebum", "kering", "dry", "dehidrasi", "hidrasi", "noda", "flek", "spots", "hiperpigmentasi", "kerutan", "garis halus", "wrinkles", "kerut"])
-
     def _generate_local_response(self, message: str, db: Session, rag_docs: List[dict], user_id: Optional[int] = None, role: str = "customer") -> str:
         """Intelligent local fallback matcher respecting role (Admin vs Customer) and to-the-point guidance."""
         msg_lower = message.lower()
@@ -2210,9 +2197,7 @@ class AIOrchestrator:
         is_wrinkles_query = any(w in msg_lower for w in ["kerutan", "garis halus", "wrinkles", "kerut"])
         is_overall_query = any(w in msg_lower for w in ["keseluruhan", "overall", "kesehatan", "total skor"])
 
-        # Pertanyaan pengetahuan soal kondisi (mis. "apa penyebab jerawat")
-        # dijawab dokumen RAG, bukan skor rata-rata user.
-        if user_id and not self._is_condition_knowledge_question(msg_lower) and (has_avg_query or any([is_acne_query, is_oily_query, is_dry_query, is_spots_query, is_wrinkles_query])):
+        if user_id and (has_avg_query or any([is_acne_query, is_oily_query, is_dry_query, is_spots_query, is_wrinkles_query])):
             u_scans = db.query(SkinScan).filter(SkinScan.user_id == user_id).order_by(desc(SkinScan.created_at)).all()
             scan_ids = [s.id for s in u_scans]
             analyses = db.query(AnalysisResult).filter(AnalysisResult.skin_scan_id.in_(scan_ids)).all() if scan_ids else []

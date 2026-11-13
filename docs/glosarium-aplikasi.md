@@ -184,6 +184,4 @@ Chatbot Laomera hanya menjawab tiga hal:
 2. **Seluruh fitur dan teknologi aplikasi** — pengertian, cara pakai, yang bisa dan yang tidak bisa, dan teknologi di baliknya (glosarium ini).
 3. **Kesehatan kulit wajah** — kondisi kulit, skor, perawatan, dan produk skincare (dijawab dokumen RAG skincare).
 
-Dokumen RAG skincare berjumlah **20 dokumen**: urutan skincare pagi/malam, 6 bahan aktif (niacinamide, salicylic acid, retinol, hyaluronic acid, vitamin C, sunscreen), pemilihan cleanser, keamanan (alergi/iritasi, bahan yang tidak boleh dicampur), FAQ (berapa lama hasil terlihat, kulit berminyak dan moisturizer, kapan ke dokter kulit), plus 6 topik baru (2026-11-13): jenis & penyebab jerawat, dark spots & hiperpigmentasi, kerutan & anti-aging, kulit kering, pengaruh gaya hidup pada kulit, dan perbaikan skin barrier.
-
 Di luar ketiga topik itu — politik, harga saham/crypto, pelajaran sekolah, masakan, olahraga, dan topik umum lainnya — chatbot menjawab jujur bahwa itu di luar yang bisa dibantu, **tanpa** menempelkan angka database dan **tanpa** dokumen yang tidak nyambung. Kalau pertanyaannya butuh tindakan medis (luka terbuka, obat keras, kondisi darurat), chatbot menyarankan dokter kulit spesialis.
