@@ -649,14 +649,38 @@ class ContextBuilder:
                     "   - Role: admin\n\n"
                 )
 
+            # Latensi DB + akun menunggu verifikasi (untuk kartu dashboard).
+            # (2026-11-13) Bagian 1 di bawah sebelumnya melaporkan "Total
+            # Customer" saja sebagai kartu dashboard — padahal kartunya
+            # menampilkan TOTAL pengguna; diperbaiki di sini.
+            pending_users = db.query(User).filter(
+                User.status.in_(["pending", "awaiting_biodata"])
+            ).order_by(User.created_at.desc()).all()
+            pending_names = ", ".join(u.name for u in pending_users) or "-"
+            db_latency_ms = None
+            try:
+                from sqlalchemy import text as _sa_text
+
+                _t0 = time.time()
+                db.execute(_sa_text("SELECT 1"))
+                db_latency_ms = round((time.time() - _t0) * 1000, 1)
+            except Exception:
+                db_latency_ms = None
+            pillar_txt = ", ".join(
+                f"{label} {pct}%" for _k, label, pct in _DASHBOARD_PILLAR_BASELINE
+            )
+
             return f"""
 DATABASE WEBSITE SKINCHECK (LIVE REPOSITORY SNAPSHOT FOR ADMIN):
-{identity_block}1. TAMPILAN KARTU METRIK DASHBOARD ADMIN (REAL-TIME UI WIDGETS):
-   - Total Customer: {total_customers} orang ({active_customers} Aktif)
-   - Face Scans: {total_scans} pemindaian ({scans_today} hari ini)
-   - Katalog Produk: {active_products} produk aktif di katalog AI
-   - Analisis Berhasil (Success Rate): {success_rate} ({failed_scans} gagal)
-   - AI Sessions: {total_ai_sessions} total sesi chat AI
+{identity_block}1. KARTU METRIK DASHBOARD ADMIN (persis seperti yang tampil di /admin):
+   - Pengguna Terdaftar: {total_users} orang ({active_users} aktif) — Customer: {total_customers}, Admin: {total_admins}
+   - Volume Sesi Scan: {total_scans} pemindaian ({scans_today} scan hari ini)
+   - Katalog Formulasi: {total_products} produk ({active_products} aktif di marketplace)
+   - AI Success Rate: {success_rate} (berhasil dianalisis: {completed_scans} dari {total_scans} scan; gagal: {failed_scans} — rincian dari data scan, bukan teks yang tampil di kartu)
+   - Distribusi 5 Pilar (yang tampil di dashboard — baseline acuan tetap, BUKAN hitungan live): {pillar_txt}
+   - Latensi Database: {db_latency_ms} ms (diukur saat snapshot ini dibuat)
+   - Menunggu verifikasi: {len(pending_users)} akun ({pending_names})
+   - CATATAN: "AI Sessions" ({total_ai_sessions} pengguna berbeda yang pernah chat) BUKAN kartu dashboard — jangan sajikan sebagai angka dashboard. "Total Customer" ({total_customers}) BUKAN total pengguna — total pengguna = customer + admin = {total_users}. Jangan pernah klaim angka "sama persis dengan dashboard" kecuali memang sama persis dengan kartu di atas.
 
 2. TABEL USERS:
    - Total Pengguna: {total_users} (Customer: {total_customers}, Admin: {total_admins})
@@ -726,6 +750,9 @@ ADMIN_SYSTEM_PROMPT = """Kamu adalah Luvenna (Ven), asisten Laomera (SkinCheck).
 🎯 GAYA JAWABAN (SAMA NATURALNYA SEPERTI KE CUSTOMER):
 1. NATURAL & RAMAH, BUKAN SEPERTI ROBOT: ngobrol santai layaknya rekan kerja yang paham website ini. Jangan pakai gaya laporan sistem ("Sistem aktif...", "Berdasarkan database...") atau kalimat kaku seperti formulir.
 2. TO THE POINT & RINGKAS: jawab langsung apa yang ditanya, 1-3 kalimat padat (atau poin ringkas kalau memang perlu daftar). Jangan nambahin metrik lain yang nggak ditanya.
+2b. ANGKA DASHBOARD: kalau ditanya angka dashboard, laporkan TOTAL pengguna (customer + admin) dengan rinciannya — jangan laporkan hitungan customer saja sebagai total. Jangan pernah klaim angka "sama persis dengan dashboard" kecuali memang sama persis dengan kartu di snapshot. Angka turunan (mis. jumlah gagal dari total scan) sebutkan sebagai hitungan turunan, bukan angka dashboard.
+2c. FOLLOW-UP: kalau admin meminta detail/rincian dari topik yang baru saja dibahas (mis. "sebutin angka pastinya satu per satu"), jawab detailnya — jangan tolak sebagai di luar cakupan.
+2d. PENJELASAN: kalau diminta "jelasin maksudnya" / penjelasan detail, jelaskan arti tiap angka/metrik. Kalau tidak diminta detail, jawab singkat dan langsung ke angka/fakta — jangan bertele-tele.
 3. SAPAAN HANYA KALAU PESANNYA CUMA SAPAAN: kalau pengguna cuma bilang "hi" atau "halo", sapa balik dengan santai. Kalau dia langsung bertanya, langsung jawab tanpa pembuka.
 4. ANGKA, ID, DAN NAMA HARUS DARI SNAPSHOT DI BAWAH: jangan pernah mengarang angka, ID, atau nama. Kalau datanya nggak ada di snapshot, bilang terus terang datanya nggak ketemu.
 5. "SIAPA SAYA": jawab dari blok identitas admin di snapshot (nama + ID pengguna + role admin). ID scan BUKAN ID orang — jangan pernah pakai ID scan sebagai ID kamu atau ID siapa pun.
@@ -747,6 +774,7 @@ RIWAYAT PERCAKAPAN SEBELUMNYA:
 3. JANGAN menjawab di luar 3 topik: data aplikasi, fitur/teknologi aplikasi, dan kesehatan kulit wajah. Di luar itu, tolak dengan ramah.
 4. JANGAN PERNAH membocorkan secret: kunci API, token, password, atau password_hash.
 5. Admin boleh menerima data seluruh pengguna — tapi jangan sebar data pribadi yang tidak ditanya.
+6. Follow-up yang meminta detail/rincian dari topik yang sama (mis. "sebutin angka pastinya satu per satu") HARUS dijawab, bukan ditolak sebagai di luar cakupan.
 """
 
 CUSTOMER_SYSTEM_PROMPT = """Nama kamu adalah Luvenna (Ven), asisten pribadi untuk kesehatan dan perawatan kulit wajah di SkinCheck.
@@ -1148,11 +1176,15 @@ _FULL_LIST_WORDS = ["seluruh", "semua", "sebutin", "sebutkan", "sebut", "list", 
 _FULL_LIST_BLOCKERS = [
     # Bukan minta daftar: "terakhir daftar" = baru mendaftar; "paling
     # banyak/sering" = top-N; "skor rata-rata semua pengguna" = agregat;
-    # "belum pernah scan/chat" = intent spesifik yang sudah ada.
+    # "belum pernah scan/chat" = intent spesifik yang sudah ada;
+    # "berapa/total/jumlah" = minta HITUNGAN, bukan daftar ("berapa total
+    # scan yang dilakukan oleh seluruh pengguna" = jumlah scan, bukan
+    # daftar 16 scan).
     "terakhir", "paling", "sering", "skor", "rata-rata", "rerata", "tren",
     "belum pernah scan", "belum pernah chat", "terakhir chat",
     "terakhir nanya", "terakhir bertanya", "terakhir ngobrol",
     "baru daftar", "baru bergabung",
+    "berapa", "total", "jumlah",
 ]
 
 
@@ -1217,6 +1249,162 @@ def _all_scans_answer(db: Session, msg_lower: str, user_id=None) -> str:
     if total > len(rows):
         lines.append(f"Menampilkan {len(rows)} dari total {total} scan.")
     return "\n".join(lines)
+
+
+# ── Snapshot kartu metrik dashboard admin ──
+# (2026-11-13) Cabang dashboard lama melaporkan hitungan CUSTOMER saja
+# ("Total Customer: 9 orang (7 aktif)") lalu mengklaim "sama persis
+# dengan yang tampil di kartu metrik dashboard admin" — padahal kartu
+# dashboard menampilkan TOTAL pengguna (10, 8 aktif). Helper ini
+# menghitung angka dengan definisi yang SAMA dengan endpoint
+# GET /api/v2/admin/dashboard (total pengguna, success rate =
+# completed/total scan), supaya jawaban chatbot dan dashboard tidak
+# pernah berselisih lagi.
+
+# Urutan kanonis 5 kondisi kulit (dipakai jawaban fokus perawatan dan
+# distribusi pilar).
+_CONDITION_ORDER = [
+    ("acne", "Jerawat"),
+    ("dry", "Kulit kering"),
+    ("oily", "Kulit berminyak"),
+    ("dark_spots", "Dark spots"),
+    ("wrinkles", "Kerutan"),
+]
+
+# Distribusi 5 pilar yang TAMPIL di dashboard admin — baseline acuan
+# TETAP (bukan hitungan live) dari CONDITION_DISTRIBUTION di frontend
+# app/admin/page.js. Dipakai HANYA untuk menjelaskan angka yang tampil
+# di dashboard, selalu dengan label jujur "baseline". Kalau frontend
+# mengubah baseline ini, ubah juga di sini. Rata-rata live dari hasil
+# scan selalu dihitung dari DB (lihat _admin_dashboard_snapshot).
+_DASHBOARD_PILLAR_BASELINE = [
+    ("acne", "Jerawat", 34),
+    ("dry", "Dehidrasi", 28),
+    ("oily", "Minyak", 22),
+    ("dark_spots", "Dark spots", 18),
+    ("wrinkles", "Fine lines", 14),
+]
+
+
+def _admin_dashboard_snapshot(db: Session) -> dict:
+    """Angka kartu metrik dashboard admin, dihitung live dari DB dengan
+    definisi yang sama seperti endpoint GET /api/v2/admin/dashboard."""
+    from datetime import date
+
+    today = date.today()
+    total_users = db.query(User).count()
+    customers = db.query(User).filter(User.role == "customer").count()
+    admins = db.query(User).filter(User.role == "admin").count()
+    active_users = db.query(User).filter(User.status == "active").count()
+    total_scans = db.query(SkinScan).count()
+    scans_today = db.query(SkinScan).filter(func.date(SkinScan.created_at) == today).count()
+    completed = db.query(SkinScan).filter(SkinScan.status == "completed").count()
+    failed = db.query(SkinScan).filter(SkinScan.status == "failed").count()
+    success_rate = round(completed / total_scans * 100, 1) if total_scans else None
+    total_products = db.query(Product).count()
+    active_products = db.query(Product).filter(Product.status == "active").count()
+    pending = (
+        db.query(User)
+        .filter(User.status.in_(["pending", "awaiting_biodata"]))
+        .order_by(User.created_at.desc())
+        .all()
+    )
+    # Latensi DB diukur seperti endpoint dashboard (SELECT 1).
+    latency_ms = None
+    try:
+        from sqlalchemy import text
+
+        t0 = time.time()
+        db.execute(text("SELECT 1"))
+        latency_ms = round((time.time() - t0) * 1000, 1)
+    except Exception:
+        latency_ms = None
+    # Rata-rata live 5 kondisi dari hasil scan yang sudah dianalisis
+    # (data nyata — berbeda dengan baseline pilar yang tampil di
+    # dashboard, lihat _DASHBOARD_PILLAR_BASELINE).
+    avg = db.query(
+        func.count(AnalysisResult.id).label("total"),
+        func.avg(AnalysisResult.overall_score).label("overall"),
+        func.avg(AnalysisResult.acne_score).label("acne"),
+        func.avg(AnalysisResult.dry_skin_score).label("dry"),
+        func.avg(AnalysisResult.oily_skin_score).label("oily"),
+        func.avg(AnalysisResult.dark_spots_score).label("dark_spots"),
+        func.avg(AnalysisResult.wrinkles_score).label("wrinkles"),
+    ).first()
+    live_avg = {}
+    if avg is not None and (getattr(avg, "total", 0) or 0) > 0:
+        for key, _label in _CONDITION_ORDER:
+            live_avg[key] = round(getattr(avg, key, 0) or 0, 1)
+        live_avg["overall"] = round(getattr(avg, "overall", 0) or 0, 1)
+        live_avg["total"] = getattr(avg, "total", 0)
+    return {
+        "total_users": total_users,
+        "customers": customers,
+        "admins": admins,
+        "active_users": active_users,
+        "total_scans": total_scans,
+        "scans_today": scans_today,
+        "completed": completed,
+        "failed": failed,
+        "success_rate": success_rate,
+        "total_products": total_products,
+        "active_products": active_products,
+        "pending": pending,
+        "latency_ms": latency_ms,
+        "live_avg": live_avg,
+    }
+
+
+def _admin_dashboard_answer(db: Session, detail: bool = False) -> str:
+    """Jawaban soal angka dashboard admin. To-the-point (detail=False):
+    angka kartu persis seperti dashboard. Detail (detail=True): tambah
+    penjelasan arti tiap angka + rata-rata live. TIDAK PERNAH mengklaim
+    "sama persis" — angkanya dihitung dengan definisi yang sama seperti
+    endpoint dashboard, dan angka turunan dilabeli sebagai turunan."""
+    s = _admin_dashboard_snapshot(db)
+    rate = f"{s['success_rate']}%" if s["success_rate"] is not None else "belum ada data"
+    pending_names = ", ".join(u.name for u in s["pending"])
+    pending_txt = (
+        f"{len(s['pending'])} akun ({pending_names})"
+        if s["pending"]
+        else "tidak ada akun yang menunggu verifikasi"
+    )
+    pillar_txt = ", ".join(f"{label} {pct}%" for _k, label, pct in _DASHBOARD_PILLAR_BASELINE)
+    latency_txt = f"{s['latency_ms']} ms" if s["latency_ms"] is not None else "tidak terukur"
+    lines = [
+        "Kartu metrik dashboard admin:",
+        f"• Pengguna Terdaftar: {s['total_users']} orang ({s['active_users']} aktif) — Customer {s['customers']}, Admin {s['admins']}",
+        f"• Volume Sesi Scan: {s['total_scans']} pemindaian ({s['scans_today']} scan hari ini)",
+        f"• Katalog Formulasi: {s['total_products']} produk ({s['active_products']} aktif di marketplace)",
+        f"• AI Success Rate: {rate} — {s['completed']} berhasil dianalisis dari {s['total_scans']} scan, {s['failed']} gagal",
+        f"• Distribusi 5 Pilar (yang tampil di dashboard): {pillar_txt}",
+        f"• Latensi Database: {latency_txt}",
+        f"• Menunggu verifikasi: {pending_txt}",
+    ]
+    if not detail:
+        return "\n".join(lines)
+    # Penjelasan arti tiap angka (hanya kalau diminta detail).
+    expl = [
+        "",
+        "Artinya:",
+        f"• Pengguna: dari {s['total_users']} akun terdaftar, {s['active_users']} sudah aktif (lolos verifikasi OTP + biodata); sisanya {s['total_users'] - s['active_users']} belum aktif.",
+        f"• Scan: {s['total_scans']} kali pemindaian sejauh ini, {s['scans_today']} di antaranya hari ini.",
+        f"• Success rate {rate} mengukur berapa persen scan yang berhasil dianalisis oleh AI (VGG-16) dari seluruh scan yang masuk.",
+        "• Distribusi 5 pilar di atas adalah baseline acuan yang ditampilkan di dashboard (bukan hitungan live).",
+    ]
+    if s["live_avg"]:
+        la = s["live_avg"]
+        expl.append(
+            "• Rata-rata live dari "
+            f"{la['total']} analisis: kesehatan keseluruhan {la['overall']}/100, jerawat {la['acne']}%, "
+            f"kering {la['dry']}%, berminyak {la['oily']}%, dark spots {la['dark_spots']}%, kerutan {la['wrinkles']}%."
+        )
+    else:
+        expl.append("• Belum ada hasil scan yang dianalisis, jadi belum ada rata-rata live.")
+    expl.append(
+        f"• Latensi database {latency_txt} adalah waktu yang dibutuhkan satu query sederhana ke database saat angka ini dihitung — makin kecil makin cepat."
+    )
+    return "\n".join(lines + expl)
 
 
 def _retrieve_for_question(db: Session, user_id, role: str, msg_lower: str):
@@ -1530,7 +1718,7 @@ APP_GLOSSARY = [
     ("Ganti nama akun", ["ganti nama", "ubah nama"],
      "Bisa — ganti nama akun lewat halaman Profil: ubah kolom nama, lalu tekan Simpan. Nama baru langsung berlaku dan tampil di dashboard serta sidebar. Yang tidak bisa diubah adalah email."),
     ("Ganti email / Gmail", ["ganti gmail", "ganti email", "ubah email", "ubah gmail", "gmail", "email"],
-     "Tidak bisa — email adalah identitas untuk masuk ke akun, jadi tidak bisa diubah setelah daftar. Di halaman Profil, kolom email memang dikunci. Kalau kamu perlu pakai email lain, daftar akun baru dengan email itu."),
+     "Tidak bisa — email adalah identitas untuk masuk ke akun, jadi tidak bisa diubah setelah daftar. Di halaman Profil, kolom email memang dikunci; kalau dicoba diubah, server menolaknya dengan pesan \"Email tidak dapat diubah\". Kalau kamu perlu pakai email lain, daftar akun baru dengan email itu."),
     ("Ganti password", ["ganti password", "ubah password", "lupa password"],
      "Customer tidak bisa ganti password sendiri — tidak ada fitur ganti password di halaman Profil. Kalau lupa password, minta admin untuk mengatur ulang passwordmu lewat halaman Pengguna. Admin bisa ganti passwordnya sendiri lewat Profil Admin, dengan memasukkan password lama (password baru minimal 6 karakter)."),
     ("Admin menonaktifkan diri sendiri", ["menonaktifkan diri", "nonaktifkan diri", "menonaktifkan akun sendiri", "nonaktifkan akun sendiri", "menonaktifkan saya", "nonaktifkan saya"],
@@ -2213,6 +2401,106 @@ class AIOrchestrator:
                 best = (key, label, phrase, v)
         return best  # (key, label, phrase, value)
 
+    def _care_focus_answer(self, db, msg_lower: str) -> str:
+        """Fokus perawatan per akun (admin). Sumber: (1) kondisi dominan
+        scan terakhir yang sudah dianalisis — logika sama dengan 'Fokus
+        Utama' di halaman Riwayat; (2) pilihan fokus di profil
+        (profile_data.skin_concerns) kalau ada. Dijawab per kondisi,
+        satu per satu, dari data DB saat pertanyaan masuk."""
+        def _map_concern(text):
+            t = (text or "").lower()
+            if any(w in t for w in ["jerawat", "acne"]):
+                return "acne"
+            if any(w in t for w in ["kering", "dry", "dehidrasi", "hidrasi"]):
+                return "dry"
+            if any(w in t for w in ["minyak", "berminyak", "oily", "sebum"]):
+                return "oily"
+            if any(w in t for w in ["flek", "noda", "dark", "hitam", "hiperpigmentasi", "spots"]):
+                return "dark_spots"
+            if any(w in t for w in ["kerut", "wrinkle", "garis halus", "penuaan", "elastisitas"]):
+                return "wrinkles"
+            return None
+
+        # Satu akun disebut namanya → fokus akun itu saja.
+        named = find_user_by_name(db, msg_lower, role="customer")
+        if named:
+            return self._one_user_focus(db, named)
+
+        customers = db.query(User).filter(User.role == "customer").order_by(User.name).all()
+        per_condition = {key: [] for key, _ in _CONDITION_ORDER}
+        no_focus = []
+        for u in customers:
+            focus = set()
+            try:
+                concerns = (u.get_profile_data() or {}).get("skin_concerns") or []
+            except Exception:
+                concerns = []
+            for c in concerns:
+                k = _map_concern(str(c))
+                if k:
+                    focus.add(k)
+            _s, ar = self._latest_analysis(db, u.id)
+            scores = self._condition_scores(ar) if ar is not None else None
+            dom = self._dominant_condition(scores) if scores else None
+            if dom:
+                focus.add(dom[0])
+            if not focus:
+                no_focus.append(u.name)
+                continue
+            for k in focus:
+                entry = u.name
+                if scores is not None:
+                    entry += f" ({scores[k]}%)"
+                else:
+                    entry += " (fokus di profil, belum ada scan)"
+                per_condition[k].append(entry)
+        # Rata-rata live per kondisi (dari hasil analisis).
+        avg = db.query(
+            func.count(AnalysisResult.id).label("total"),
+            func.avg(AnalysisResult.acne_score).label("acne"),
+            func.avg(AnalysisResult.dry_skin_score).label("dry"),
+            func.avg(AnalysisResult.oily_skin_score).label("oily"),
+            func.avg(AnalysisResult.dark_spots_score).label("dark_spots"),
+            func.avg(AnalysisResult.wrinkles_score).label("wrinkles"),
+        ).first()
+        tot = getattr(avg, "total", 0) or 0
+        lines = ["Fokus perawatan per akun — dari kondisi dominan scan terakhir dan pilihan fokus di profil, satu per satu:"]
+        for i, (key, label) in enumerate(_CONDITION_ORDER, 1):
+            avg_txt = f"rata-rata platform {round(getattr(avg, key, 0) or 0, 1)}%" if tot else "belum ada data rata-rata"
+            members = ", ".join(per_condition[key]) if per_condition[key] else f"tidak ada akun yang fokusnya {label.lower()}"
+            lines.append(f"{i}. {label} ({avg_txt}): {members}.")
+        if no_focus:
+            lines.append(
+                "Belum ada data fokus perawatan: " + ", ".join(no_focus) +
+                " (belum ada scan yang berhasil dianalisis / belum isi fokus di profil)."
+            )
+        return "\n".join(lines)
+
+    def _one_user_focus(self, db, user) -> str:
+        """Fokus perawatan satu customer: kondisi dominan scan terakhir
+        + 5 skornya + pilihan fokus di profil (kalau ada)."""
+        try:
+            concerns = (user.get_profile_data() or {}).get("skin_concerns") or []
+        except Exception:
+            concerns = []
+        concerns = [str(c) for c in concerns if str(c).strip()]
+        _s, ar = self._latest_analysis(db, user.id)
+        if ar is None:
+            focus_txt = ", ".join(concerns) if concerns else "belum ada"
+            return (
+                f"Fokus perawatan {user.name}: {focus_txt} (dari profil). "
+                "Belum ada scan yang berhasil dianalisis, jadi belum ada kondisi dominan dari scan."
+            )
+        scores = self._condition_scores(ar)
+        dom = self._dominant_condition(scores)
+        labels = dict(_CONDITION_ORDER)
+        scores_txt = ", ".join(f"{labels[k].lower()} {scores[k]}%" for k, _l in _CONDITION_ORDER)
+        focus_txt = ", ".join(concerns) if concerns else "tidak diisi di profil"
+        return (
+            f"Fokus perawatan {user.name}: {dom[1]} (kondisi dominan di scan terakhir, skor {dom[3]}%). "
+            f"Skor 5 kondisinya: {scores_txt}. Fokus yang dipilih di profil: {focus_txt}."
+        )
+
     def _condition_tip(self, key: str, value: float) -> str:
         """Saran perawatan per kondisi — dipakai cabang 4c dan 5.a-5.e.
         Teksnya sama dengan yang sudah ada di 5.a-5.e."""
@@ -2293,6 +2581,29 @@ class AIOrchestrator:
                     "Sebagai admin, kamu bisa tanya aku soal apa aja yang ada di database website ini — "
                     "misalnya jumlah pengguna, siapa yang paling sering scan, scan terbaru, produk di katalog, "
                     "tren masalah kulit pengguna, sampai log aktivitas. Kalau mau tanya soal perawatan kulit juga boleh."
+                )
+
+            # 0a. Ganti nama / email akun (admin) — "cara ganti nama admin
+            # gimana" / "bisa ga ganti gmail admin" (2026-11-13).
+            # Diletakkan SEBELUM glosarium (0b): glosarium menjawab
+            # generik ("lewat halaman Profil") tanpa menyebut Profil
+            # Admin dan endpointnya, dan "Bisa ga ganti gmail" tidak
+            # memicu glosarium sama sekali (bukan "apakah bisa"/"cara")
+            # sehingga dulu jatuh ke penolakan. Nama BOLEH diubah (Profil
+            # Admin, PATCH /api/v2/admin/profile); email TIDAK BOLEH
+            # diubah (server menolak 400 "Email tidak dapat diubah").
+            if any(w in msg_lower for w in ["ganti nama", "ubah nama", "ganti gmail", "ganti email", "ubah gmail", "ubah email"]):
+                if any(w in msg_lower for w in ["gmail", "email"]):
+                    return (
+                        "Tidak bisa — email adalah identitas untuk masuk ke akun, jadi tidak bisa "
+                        "diubah setelah akun dibuat. Kalau dicoba diubah lewat Profil Admin, server "
+                        "menolaknya dengan pesan \"Email tidak dapat diubah\"."
+                    )
+                return (
+                    "Bisa — ganti nama admin lewat halaman Profil Admin: ubah kolom nama, lalu tekan "
+                    "Simpan. Nama baru langsung berlaku dan tampil di dashboard serta sidebar. "
+                    "Di belakang layar ini memanggil PATCH /api/v2/admin/profile (nama tidak boleh kosong); "
+                    "untuk customer jalurnya sama lewat Profil, PATCH /api/v2/profile."
                 )
 
             # 0b. Definisi / pengertian konsep aplikasi (glosarium).
@@ -2398,6 +2709,14 @@ class AIOrchestrator:
                     "   - `app/views/pages/admin/`: Panel dashboard dan manajemen data admin.\n\n"
                     "Silakan sebutkan bagian file atau fitur spesifik yang ingin dimodifikasi, dan solusi kode langsung siap diimplementasikan."
                 )
+
+            # 3b. Fokus perawatan per akun — "akun yang fokus perawatannya
+            # jerawat siapa aja, lalu berminyak siapa aja, dan 5 output
+            # itu tanyain satu-satu" (2026-11-13). Diletakkan sebelum
+            # cabang scan/pengguna supaya tidak direbut ringkasan pengguna
+            # ("akun" ada di pertanyaan ini).
+            if any(w in msg_lower for w in ["fokus perawatan", "fokus perawatannya", "fokusnya"]):
+                return self._care_focus_answer(db, msg_lower)
 
             # 4. Pertanyaan soal SCAN — dicek SEBELUM snapshot pengguna.
             # (2026-11-13) "berapa total scan yang dilakukan oleh seluruh
@@ -2718,30 +3037,23 @@ class AIOrchestrator:
                     res.append(f"• [{l.created_at.strftime('%d/%m %H:%M')}] {who}: {l.activity} (IP: {l.ip_address or '-'})")
                 return "\n".join(res)
 
-            # 8. Admin Dashboard Cards & UI Metrics Overview
+            # 8. Admin Dashboard Cards & UI Metrics Overview — dihitung
+            # dengan definisi yang sama seperti endpoint dashboard
+            # (2026-11-13): TOTAL pengguna (customer + admin), bukan
+            # customer saja. Klaim "sama persis" DILARANG — angkanya
+            # disajikan apa adanya; angka turunan dilabeli turunan.
+            # Kalau diminta penjelasan ("jelasin maksudnya"), tambah arti
+            # tiap angka + rata-rata live; kalau tidak, jawab singkat.
             if any(w in msg_lower for w in ["dashboard", "ringkasan", "metrik", "statistik dashboard", "angka dashboard", "tampilan admin"]):
-                from datetime import date
-                today = date.today()
-                total_customers = db.query(User).filter(User.role == "customer").count()
-                active_customers = db.query(User).filter(User.role == "customer", User.status == "active").count()
-                total_scans = db.query(SkinScan).count()
-                scans_today = db.query(SkinScan).filter(func.date(SkinScan.created_at) == today).count()
-                active_products = db.query(Product).filter(Product.status == "active").count()
-                completed_scans = db.query(SkinScan).filter(SkinScan.status == "completed").count()
-                failed_scans = db.query(SkinScan).filter(SkinScan.status == "failed").count()
-                total_analysis = completed_scans + failed_scans
-                success_rate = f"{(completed_scans / total_analysis * 100):.1f}%" if total_analysis > 0 else "0%"
-                total_ai_sessions = db.query(ChatMessage.user_id).distinct().count()
+                detail = any(w in msg_lower for w in ["jelasin", "jelaskan", "maksudnya", "maksud", "artinya", "detail", "penjelasan"])
+                return _admin_dashboard_answer(db, detail=detail)
 
-                return (
-                    f"**Ringkasan Metrik Tampilan Dashboard Admin:**\n"
-                    f"• **Total Customer**: {total_customers} orang ({active_customers} aktif)\n"
-                    f"• **Face Scans**: {total_scans} pemindaian ({scans_today} scan hari ini)\n"
-                    f"• **Katalog Produk**: {active_products} produk aktif di katalog AI\n"
-                    f"• **Analisis Berhasil (Success Rate)**: {success_rate} ({failed_scans} gagal)\n"
-                    f"• **AI Sessions**: {total_ai_sessions} total sesi obrolan\n"
-                    f"Angka-angka di atas sama persis dengan yang tampil di kartu metrik dashboard admin."
-                )
+            # 8b. Follow-up angka dashboard — "sebutin angka pastinya satu
+            # per satu" (2026-11-13): pertanyaan lanjutan soal angka HARUS
+            # dijawab dengan rincian angka dashboard, bukan ditolak sebagai
+            # di luar cakupan. (Sebelumnya jatuh ke penolakan default.)
+            if any(w in msg_lower for w in ["angka pastinya", "satu per satu", "satu-satu", "sebutin angkanya", "rincian angka", "detail angka", "angka detail", "angka lengkap"]):
+                return _admin_dashboard_answer(db, detail=True)
 
             # 9. Retriever database — jalan terakhir sebelum RAG/penolakan.
             # (2026-11-13) Cabang keyword tidak menutup "tanya apa pun":

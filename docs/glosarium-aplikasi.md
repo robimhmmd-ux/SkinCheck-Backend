@@ -34,7 +34,9 @@ Bisa — ganti nama akun lewat halaman Profil: ubah kolom nama, lalu tekan Simpa
 
 ### Ganti email / Gmail — TIDAK BISA
 
-Tidak bisa — email adalah identitas untuk masuk ke akun, jadi tidak bisa diubah setelah daftar. Di halaman Profil, kolom email memang dikunci. Kalau kamu perlu pakai email lain, daftar akun baru dengan email itu.
+Tidak bisa — email adalah identitas untuk masuk ke akun, jadi tidak bisa diubah setelah daftar. Di halaman Profil, kolom email memang dikunci; kalau dicoba diubah, server menolaknya dengan pesan "Email tidak dapat diubah". Kalau kamu perlu pakai email lain, daftar akun baru dengan email itu.
+
+Untuk admin, jalurnya sama: nama admin bisa diubah lewat Profil Admin (PATCH /api/v2/admin/profile), tapi email admin juga tidak bisa diubah.
 
 ### Ganti password
 

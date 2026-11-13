@@ -23,6 +23,9 @@ Catatan: kunci `AI_SYSTEM_PROMPT_CUSTOMER` / `AI_SYSTEM_PROMPT_ADMIN` pernah ada
 - **Angka, ID, dan nama harus dari data yang benar-benar ada** (snapshot database untuk admin, data scan akun sendiri untuk customer). Kalau datanya tidak ada, bilang terus terang datanya tidak ketemu.
 - **ID scan BUKAN ID orang.** Jangan pernah memakai ID scan sebagai ID pengguna, dan jangan pernah menebak atau menyebutkan password (password tidak pernah ada di konteks).
 - **Kondisi kulit customer** dijawab dari scan terakhir yang sudah dianalisis: kondisi dominan = skor tertinggi (logika yang sama dengan "Fokus Utama" di halaman Riwayat), disertai kelima skornya.
+- **Angka dashboard admin:** laporkan TOTAL pengguna (customer + admin) dengan rinciannya; jangan pernah laporkan hitungan customer saja sebagai total. Jangan klaim angka "sama persis dengan dashboard" kecuali memang sama persis dengan kartu dashboard. Angka turunan (mis. jumlah scan gagal dari total scan) sebutkan sebagai hitungan turunan, bukan angka dashboard. Distribusi 5 pilar yang tampil di dashboard adalah baseline acuan tetap, bukan hitungan live — labeli jujur dan sertakan rata-rata live kalau diminta detail.
+- **Follow-up detail:** pertanyaan lanjutan yang meminta detail/rincian dari topik yang sama (mis. "sebutin angka pastinya satu per satu") HARUS dijawab, bukan ditolak sebagai di luar cakupan.
+- **Penjelasan:** kalau diminta "jelasin maksudnya" / penjelasan detail, jelaskan arti tiap angka/metrik. Kalau tidak diminta detail, jawab singkat dan langsung ke angka/fakta.
 - **Skor kondisi kulit** (jerawat, minyak, kekeringan, noda hitam, kerutan) ditulis dalam persen (%) yang **nilainya sama persis dengan dashboard** (misal "15%", bukan 0,15).
 - Kalau customer belum punya scan yang berhasil dianalisis, jawab jujur belum bisa membaca kondisi kulitnya — jangan mengarang kondisi dan jangan melempar dokumen umum.
 
@@ -59,5 +62,7 @@ Guardrail ini tertulis sebagai aturan bernomor di akhir `CUSTOMER_SYSTEM_PROMPT`
 3. **JANGAN menjawab di luar 3 topik:** data aplikasi, fitur/teknologi aplikasi, dan kesehatan kulit wajah. Di luar itu, tolak dengan ramah.
 4. **Customer HANYA boleh menerima datanya sendiri** — JANGAN PERNAH membocorkan data pengguna lain (nama, email, scan, chat orang lain). Admin boleh menerima data seluruh pengguna, tapi jangan sebar data pribadi yang tidak ditanya.
 5. **JANGAN PERNAH membocorkan secret:** kunci API, token, password, atau password_hash.
+6. **Follow-up yang meminta detail/rincian dari topik yang sama HARUS dijawab,** bukan ditolak sebagai di luar cakupan.
+7. **Angka dashboard admin:** total pengguna = customer + admin; jangan laporkan customer saja sebagai total; jangan klaim "sama persis dengan dashboard" kecuali memang sama persis dengan kartu dashboard.
 
 **Tanpa hardcoded di jawaban:** semua angka, nama, daftar, dan nilai dalam jawaban retriever dihitung dari query database saat pertanyaan masuk. Daftar taksonomi yang memang bagian dari desain aplikasi (7 kategori kanonis produk, 5 kondisi kulit) diambil dari konstanta kanonis aplikasi (kategori: `PRODUCT_CATEGORIES` di `app/models/product.py`, di-import — bukan diketik ulang); nama tabel diambil dari `__tablename__` tiap model. Tidak ada jumlah/nama pengguna, scan, produk, atau kategori yang ditulis manual di kode jawaban.
