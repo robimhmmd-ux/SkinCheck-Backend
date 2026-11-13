@@ -1070,13 +1070,13 @@ SETTING_DEFS = [
     ("AI_SIMULATION_MODE", "off", False),
     # Provider AI (2026-11-13): "gemini" (Google AI Studio) atau "nvidia"
     # (endpoint OpenAI-compatible NVIDIA). AI_MODEL = model Gemini,
-    # AI_MODEL_NVIDIA = model NVIDIA. Aturan jawaban (system prompt) bisa
-    # diisi admin dari Konfigurasi; kosong = pakai aturan bawaan di kode.
+    # AI_MODEL_NVIDIA = model NVIDIA. Aturan jawaban (system prompt) TIDAK
+    # lagi di database — aturan bawaan di kode (CUSTOMER/ADMIN_SYSTEM_PROMPT
+    # di app/services/ai_assistant_service.py), didokumentasikan di
+    # docs/aturan-jawaban-ai.md.
     ("AI_PROVIDER", "gemini", False),
     ("AI_MODEL_NVIDIA", "meta/llama-3.1-8b-instruct", False),
     ("AI_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1", False),
-    ("AI_SYSTEM_PROMPT_CUSTOMER", "", False),
-    ("AI_SYSTEM_PROMPT_ADMIN", "", False),
     ("SCAN_DAILY_QUOTA", "", False),  # kosong = tanpa batas (default aman)
     ("OTP_MODE", "", False),
     # REGISTRATION_OTP_MODE (2026-11-12): KUNCI INI WAJIB ADA — frontend tab

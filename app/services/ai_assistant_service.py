@@ -787,37 +787,19 @@ RIWAYAT PERCAKAPAN SEBELUMNYA:
 """
 
 
-def _format_prompt(template: str, **values) -> str:
-    """Ganti hanya placeholder yang dikenal ({user_context}, {chat_history},
-    ...). Kurung kurawal lain di teks aturan buatan admin (mis. contoh JSON)
-    dibiarkan apa adanya, supaya aturan yang ditulis admin tidak pernah
-    meledak di str.format()."""
-    out = template
-    for key, val in values.items():
-        out = out.replace("{" + key + "}", val)
-    return out
-
-
 def _get_system_prompt(db: Session, role: str) -> str:
-    """Aturan jawaban AI dari database (AI_SYSTEM_PROMPT_ADMIN/CUSTOMER).
-    Kosong / tidak ada -> pakai konstanta hardcode sebagai aturan bawaan."""
-    if role == "admin":
-        custom = (SystemSetting.get_value(db, "AI_SYSTEM_PROMPT_ADMIN", "") or "").strip()
-        return custom or ADMIN_SYSTEM_PROMPT
-    custom = (SystemSetting.get_value(db, "AI_SYSTEM_PROMPT_CUSTOMER", "") or "").strip()
-    return custom or CUSTOMER_SYSTEM_PROMPT
+    """Aturan jawaban AI adalah konstanta hardcode (ADMIN_SYSTEM_PROMPT /
+    CUSTOMER_SYSTEM_PROMPT di file ini). Aturan TIDAK lagi dibaca dari
+    database — didokumentasikan di docs/aturan-jawaban-ai.md. Parameter
+    db dipertahankan supaya pemanggil tidak berubah."""
+    return ADMIN_SYSTEM_PROMPT if role == "admin" else CUSTOMER_SYSTEM_PROMPT
 
 
 def _render_system_prompt(db: Session, role: str, **values) -> str:
-    """Render template prompt. Kalau yang dipakai aturan bawaan, jalurnya
-    persis seperti sebelumnya (str.format) supaya prompt jalur Gemini tidak
-    berubah satu karakter pun; kalau aturan buatan admin, pakai
-    _format_prompt yang aman terhadap kurung kurawal."""
+    """Render template prompt bawaan dengan str.format (jalur ini tidak
+    pernah berubah satu karakter pun untuk jalur Gemini)."""
     template = _get_system_prompt(db, role)
-    default = ADMIN_SYSTEM_PROMPT if role == "admin" else CUSTOMER_SYSTEM_PROMPT
-    if template is default:
-        return template.format(**values)
-    return _format_prompt(template, **values)
+    return template.format(**values)
 
 
 # ─────────────────────────────────────────────────────────
