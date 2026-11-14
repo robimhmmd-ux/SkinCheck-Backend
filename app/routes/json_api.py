@@ -48,6 +48,7 @@ from app.models.product import Product
 from app.models.skin_scan import SkinScan
 from app.models.system_setting import SystemSetting
 from app.models.user import User
+from app.services.fonnte_otp import _send_whatsapp, mask_phone, normalize_phone
 from app.utils.auth import get_password_hash, verify_password
 
 logger = logging.getLogger(__name__)
@@ -826,6 +827,44 @@ async def history_detail(scan_id: int, request: Request, db: Session = Depends(g
     return JSONResponse(content=_scan_dict(scan, analysis))
 
 
+def _notify_scan_ready_wa(db: Session, user: dict, analysis_result: AnalysisResult) -> None:
+    """Kirim WA 'hasil scan siap' — best-effort, tidak pernah gagalkan scan.
+
+    Hanya untuk customer login yang punya nomor HP di profile_data["phone"]
+    (format 62..., dinormalisasi saat register). Tamu/tester (is_guest)
+    dilewati. Kegagalan kirim apa pun (token Fonnte belum disetel, Fonnte
+    down, nomor tidak valid) hanya dicatat sebagai warning; respons scan
+    tetap sukses.
+    """
+    try:
+        if user.get("is_guest"):
+            return
+        if analysis_result is None or analysis_result.overall_score is None:
+            return
+        row = db.query(User).filter(User.id == user["id"]).first()
+        if row is None:
+            return
+        phone_raw = (row.get_profile_data() or {}).get("phone")
+        if not phone_raw:
+            return
+        phone62 = normalize_phone(str(phone_raw))
+        name = (row.name or user.get("name") or "").strip() or "Kak"
+        overall = float(analysis_result.overall_score)
+        message = (
+            f"Halo {name}! Hasil scan wajah kamu sudah siap — "
+            f"skor kesehatan kulitmu {overall:g}/100. "
+            "Buka Laomera untuk melihat detailnya."
+        )
+        _send_whatsapp(phone62, message, db)
+        logger.info(
+            "Notifikasi WA 'hasil scan siap' terkirim ke %s",
+            mask_phone(phone62),
+        )
+    except Exception as e:  # noqa: BLE001 - notifikasi tidak boleh gagalkan scan
+        logger.warning("Notifikasi WA 'hasil scan siap' gagal: %s", e)
+        return
+
+
 @router.post("/scan/upload", status_code=201)
 async def scan_upload(
     request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)
@@ -922,6 +961,9 @@ async def scan_upload(
             db.rollback()
             scan.status = "failed"
         analysis_result = None
+
+    if scan.status == "completed" and analysis_result is not None:
+        _notify_scan_ready_wa(db, user, analysis_result)
 
     response_content = {
         "scan_id": scan.id,
@@ -1047,6 +1089,9 @@ async def scan_multi_upload(
             db.rollback()
             scan.status = "failed"
         analysis_result = None
+
+    if scan.status == "completed" and analysis_result is not None:
+        _notify_scan_ready_wa(db, user, analysis_result)
 
     response_content = {
         "scan_id": scan.id,
