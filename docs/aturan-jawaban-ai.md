@@ -49,13 +49,13 @@ Fokus pada perawatan kulit wajah non-medis. Kalau di luar domain atau membutuhka
 
 ## 6. Kalau model AI gagal (fallback lokal)
 
-Kalau panggilan model AI (Gemini/NVIDIA) gagal — kunci salah, kuota habis, atau provider mati — chatbot **jatuh ke jawaban lokal dari database, dan tidak pernah error 500**. Fallback menjawab dari cabang-cabang data asli (jumlah scan, scan terakhir, kondisi kulit, skor per kondisi, status akun, obrolan customer untuk admin) dengan gaya dan disiplin saran yang sama seperti di atas. Kalau pertanyaannya tidak cocok dengan cabang mana pun, fallback menjawab ringkasan natural dari data yang ada — tanpa mengarang angka atau data.
+Kalau panggilan model AI (Gemini/Groq) gagal — kunci salah, kuota habis, atau provider mati — chatbot **jatuh ke jawaban lokal dari database, dan tidak pernah error 500**. Fallback menjawab dari cabang-cabang data asli (jumlah scan, scan terakhir, kondisi kulit, skor per kondisi, status akun, obrolan customer untuk admin) dengan gaya dan disiplin saran yang sama seperti di atas. Kalau pertanyaannya tidak cocok dengan cabang mana pun, fallback menjawab ringkasan natural dari data yang ada — tanpa mengarang angka atau data.
 
 Pengertian istilah dan fitur aplikasi (glosarium): lihat `docs/glosarium-aplikasi.md` — isinya sama dengan `APP_GLOSSARY` di `ai_assistant_service.py`, dipakai fallback lokal untuk menjawab pertanyaan "apa itu ...?" dan disisipkan ringkas ke prompt jalur pintar kalau pertanyaannya memang definisi.
 
 ## 7. Guardrail (di akhir kedua system prompt, 2026-11-13)
 
-Guardrail ini tertulis sebagai aturan bernomor di akhir `CUSTOMER_SYSTEM_PROMPT` dan `ADMIN_SYSTEM_PROMPT` — berlaku untuk jalur pintar (Gemini/NVIDIA) maupun sebagai prinsip fallback lokal:
+Guardrail ini tertulis sebagai aturan bernomor di akhir `CUSTOMER_SYSTEM_PROMPT` dan `ADMIN_SYSTEM_PROMPT` — berlaku untuk jalur pintar (Gemini/Groq) maupun sebagai prinsip fallback lokal:
 
 1. **Jawab HANYA dari konteks yang diberikan** (snapshot database, dokumen RAG, glosarium, hasil retriever, riwayat chat) — jangan pakai pengetahuan luar untuk data aplikasi.
 2. **JANGAN PERNAH mengarang angka, nama, ID, tanggal, atau data apa pun.** Kalau datanya tidak ada di konteks, jawab jujur "datanya tidak ada" atau "aku tidak tahu" — jangan menebak.

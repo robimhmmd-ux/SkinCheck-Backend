@@ -1070,9 +1070,9 @@ SETTING_DEFS = [
     ("AI_TEMPERATURE", "0.7", False),
     ("AI_SIMULATION_MODE", "off", False),
     # Provider AI (2026-11-13, tambah Groq 2026-11-14; DeepSeek DIHAPUS
-    # 2026-11-14 karena berbayar — hanya provider gratis): "gemini"
-    # (Google AI Studio) atau "nvidia"/"groq" (endpoint OpenAI-compatible).
-    # AI_MODEL = model Gemini, AI_MODEL_NVIDIA = model NVIDIA,
+    # 2026-11-14 karena berbayar, NVIDIA DIHAPUS 2026-11-14 karena tidak
+    # dipakai — hanya Gemini + Groq): "gemini" (Google AI Studio) atau
+    # "groq" (endpoint OpenAI-compatible). AI_MODEL = model Gemini,
     # AI_MODEL_GROQ = model Groq. Aturan jawaban (system prompt) TIDAK lagi
     # di database — aturan bawaan di kode (CUSTOMER/ADMIN_SYSTEM_PROMPT di
     # app/services/ai_assistant_service.py), didokumentasikan di
@@ -1087,9 +1087,7 @@ SETTING_DEFS = [
     # (tidak ada catatan tes sebelumnya) — admin menguji tiap provider
     # sekali lewat tombol "Uji" / modal tambah-key. Default "[]" (kosong).
     ("AI_VERIFIED_PROVIDERS", "[]", False),
-    ("AI_MODEL_NVIDIA", "meta/llama-3.1-8b-instruct", False),
     ("AI_MODEL_GROQ", "llama-3.3-70b-versatile", False),
-    ("AI_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1", False),
     ("AI_GROQ_BASE_URL", "https://api.groq.com/openai/v1", False),
     ("SCAN_DAILY_QUOTA", "", False),  # kosong = tanpa batas (default aman)
     ("OTP_MODE", "", False),
@@ -1104,7 +1102,6 @@ SETTING_DEFS = [
     ("MAINTENANCE_MODE", "off", False),
     ("VGG_THRESHOLD", "40", False),
     ("GEMINI_API_KEY", "", True),
-    ("NVIDIA_API_KEY", "", True),
     ("GROQ_API_KEY", "", True),
     ("FONNTE_TOKEN", "", True),
     ("WA_API_TOKEN", "", True),
@@ -1126,7 +1123,6 @@ AI_VERIFIED_PROVIDERS_KEY = "AI_VERIFIED_PROVIDERS"
 # menghapus tanda terverifikasi provider itu (harus uji ulang).
 _PROVIDER_SETTING_KEYS = {
     "gemini": ("GEMINI_API_KEY", "AI_MODEL"),
-    "nvidia": ("NVIDIA_API_KEY", "AI_MODEL_NVIDIA", "AI_NVIDIA_BASE_URL"),
     "groq": ("GROQ_API_KEY", "AI_MODEL_GROQ", "AI_GROQ_BASE_URL"),
 }
 
@@ -1153,17 +1149,17 @@ def _get_verified_providers(db: Session) -> list:
         return []
     if not isinstance(data, list):
         return []
-    return [p for p in data if p in ("gemini", "nvidia", "groq")]
+    return [p for p in data if p in ("gemini", "groq")]
 
 
 def _set_verified_providers(db: Session, providers) -> None:
-    clean = [p for p in dict.fromkeys(providers or []) if p in ("gemini", "nvidia", "groq")]
+    clean = [p for p in dict.fromkeys(providers or []) if p in ("gemini", "groq")]
     SystemSetting.set_value(db, AI_VERIFIED_PROVIDERS_KEY, json.dumps(clean))
 
 
 def _mark_provider_verified(db: Session, provider: str, verified: bool) -> None:
     """Tandai/hapus tanda terverifikasi satu provider (persist)."""
-    if provider not in ("gemini", "nvidia", "groq"):
+    if provider not in ("gemini", "groq"):
         return
     current = _get_verified_providers(db)
     if verified:
@@ -1213,7 +1209,7 @@ def _apply_test_ai_result(db: Session, provider: str, ok: bool) -> None:
             return
         verified = _get_verified_providers(db)
         fallback = "gemini"
-        for cand in ("gemini", "nvidia", "groq"):
+        for cand in ("gemini", "groq"):
             if cand in verified:
                 fallback = cand
                 break
@@ -1267,7 +1263,7 @@ async def admin_get_settings(request: Request, db: Session = Depends(get_db)):
             # lengkap. Bila kosong, preview kosong (frontend menampilkan
             # "Terpasang" dari `configured`).
             preview = ""
-            if key in ("GEMINI_API_KEY", "NVIDIA_API_KEY", "GROQ_API_KEY") and raw:
+            if key in ("GEMINI_API_KEY", "GROQ_API_KEY") and raw:
                 preview = _key_preview(raw)
             if is_secret:
                 # Mask total: hanya penanda, bukan nilai.
@@ -1335,18 +1331,14 @@ async def admin_patch_settings(
             if not text:
                 return JSONResponse(status_code=400, content={"detail": "AI_MODEL tidak boleh kosong."})
             normalized[key] = text
-        elif key == "AI_MODEL_NVIDIA":
-            if not text:
-                return JSONResponse(status_code=400, content={"detail": "AI_MODEL_NVIDIA tidak boleh kosong."})
-            normalized[key] = text
         elif key == "AI_MODEL_GROQ":
             if not text:
                 return JSONResponse(status_code=400, content={"detail": "AI_MODEL_GROQ tidak boleh kosong."})
             normalized[key] = text
         elif key == "AI_PROVIDER":
             low = text.lower()
-            if low not in ("gemini", "nvidia", "groq"):
-                return JSONResponse(status_code=400, content={"detail": "AI_PROVIDER harus 'gemini', 'nvidia', atau 'groq'."})
+            if low not in ("gemini", "groq"):
+                return JSONResponse(status_code=400, content={"detail": "AI_PROVIDER harus 'gemini' atau 'groq'."})
             normalized[key] = low
         elif key == "AI_TEMPERATURE":
             try:
@@ -1380,8 +1372,8 @@ async def admin_patch_settings(
                 parsed = json.loads(text)
             except ValueError:
                 return JSONResponse(status_code=400, content={"detail": "AI_VERIFIED_PROVIDERS harus berupa daftar JSON provider."})
-            if not isinstance(parsed, list) or any(p not in ("gemini", "nvidia", "groq") for p in parsed):
-                return JSONResponse(status_code=400, content={"detail": "AI_VERIFIED_PROVIDERS hanya boleh berisi gemini/nvidia/groq."})
+            if not isinstance(parsed, list) or any(p not in ("gemini", "groq") for p in parsed):
+                return JSONResponse(status_code=400, content={"detail": "AI_VERIFIED_PROVIDERS hanya boleh berisi gemini/groq."})
             normalized[key] = json.dumps([p for p in dict.fromkeys(parsed)])
         else:
             normalized[key] = text
@@ -1389,7 +1381,7 @@ async def admin_patch_settings(
     # terverifikasi bila nilainya BENAR-BENAR berubah (simpan tab yang
     # tidak mengubah apa-apa tidak boleh menghapus tanda).
     _old_ai_values = {}
-    for _k in ("GEMINI_API_KEY", "AI_MODEL", "NVIDIA_API_KEY", "AI_MODEL_NVIDIA", "AI_NVIDIA_BASE_URL", "GROQ_API_KEY", "AI_MODEL_GROQ", "AI_GROQ_BASE_URL"):
+    for _k in ("GEMINI_API_KEY", "AI_MODEL", "GROQ_API_KEY", "AI_MODEL_GROQ", "AI_GROQ_BASE_URL"):
         _old_ai_values[_k] = SystemSetting.get_value(db, _k) or ""
     try:
         changed = []
@@ -1465,19 +1457,19 @@ async def admin_test_ai(
     t0 = time.time()
     # Provider yang diuji: yang diminta di body (tombol "Uji" / auto-test
     # modal) atau yang AKTIF (AI_PROVIDER) bila tidak diminta. Nilai
-    # tersimpan yang tidak dikenal (mis. "deepseek" lama, sebelum provider
+    # tersimpan yang tidak dikenal (mis. "nvidia" lama, sebelum provider
     # itu dihapus 2026-11-14) jatuh ke gemini. Hasil tes dicatat ke flag
     # terverifikasi: sukses -> tandai, gagal -> hapus tanda (+ bila yang
     # gagal adalah provider aktif, seleksi aktif jatuh ke terverifikasi
     # lain — lihat _apply_test_ai_result).
     requested = (body.provider or "").strip().lower() if body and body.provider else ""
-    if requested in ("gemini", "nvidia", "groq"):
+    if requested in ("gemini", "groq"):
         provider = requested
     else:
         provider = (SystemSetting.get_value(db, "AI_PROVIDER", "gemini") or "gemini").strip().lower()
-        if provider not in ("gemini", "nvidia", "groq"):
+        if provider not in ("gemini", "groq"):
             provider = "gemini"
-    if provider in ("nvidia", "groq"):
+    if provider == "groq":
         from app.services.ai_assistant_service import (
             OPENAI_COMPATIBLE_PROVIDERS,
             _call_openai_compatible_chat,
@@ -1597,14 +1589,16 @@ class DetectProviderIn(BaseModel):
 async def admin_detect_provider(request: Request, body: DetectProviderIn, db: Session = Depends(get_db)):
     """Auto-deteksi provider dari satu API key (tanpa menyimpan key).
 
-    Mencoba key ke endpoint list-model tiap provider (Gemini, NVIDIA,
-    Groq); provider pertama yang menjawab 200 + daftar
+    Mencoba key ke endpoint list-model tiap provider (Gemini, Groq);
+    provider pertama yang menjawab 200 + daftar
     modelnya dikembalikan. Key HANYA dipakai di memori selama deteksi:
     tidak disimpan ke database, tidak di-log, tidak dikembalikan ke
     client. Urutan pengecekan: petunjuk format key dulu, lalu
-    groq → nvidia → gemini (lihat detect_provider_from_key
+    groq → gemini (lihat detect_provider_from_key
     di ai_assistant_service). DeepSeek TIDAK didukung (berbayar):
-    kunci "sk-" langsung ditolak dengan pesan yang jelas.
+    kunci "sk-" langsung ditolak dengan pesan yang jelas. NVIDIA
+    TIDAK dipakai (2026-11-14): kunci "nvapi-" langsung ditolak
+    dengan pesan yang jelas.
     """
     admin = _require_admin(request)
     api_key = (body.api_key or "").strip()
@@ -1615,7 +1609,7 @@ async def admin_detect_provider(request: Request, body: DetectProviderIn, db: Se
     # selalu dipakai URL asli tiap provider.
     url_overrides = {
         p: os.environ.get(f"DETECT_{p.upper()}_MODELS_URL", "")
-        for p in ("gemini", "nvidia", "groq")
+        for p in ("gemini", "groq")
     }
     url_overrides = {p: u for p, u in url_overrides.items() if u}
     from app.services.ai_assistant_service import detect_provider_from_key

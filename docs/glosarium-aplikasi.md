@@ -172,13 +172,13 @@ Customer adalah pengguna biasa aplikasi: dia bisa scan kulit, melihat dashboard 
 
 ## AI & pengaturan
 
-### Provider AI (Gemini / NVIDIA)
+### Provider AI (Gemini / Groq)
 
-Chatbot Laomera bisa memakai dua penyedia AI: Gemini (Google) atau NVIDIA (model Llama lewat API yang kompatibel dengan OpenAI). Admin memilihnya di Konfigurasi → tab AI, mengisi kunci API-nya, dan perubahannya langsung berlaku tanpa restart. Kalau kuncinya salah atau providernya mati, chatbot tetap menjawab dari jawaban lokal, bukan error.
+Chatbot Laomera bisa memakai dua penyedia AI gratis: Gemini (Google) atau Groq (OpenAI-compatible). Admin memilihnya di Konfigurasi → tab AI, mengisi kunci API-nya, dan perubahannya langsung berlaku tanpa restart. Kalau kuncinya salah atau providernya mati, chatbot tetap menjawab dari jawaban lokal, bukan error.
 
 ### Konfigurasi admin
 
-Konfigurasi adalah halaman pengaturan admin (menu Konfigurasi) dengan tiga tab: AI (provider Gemini/NVIDIA, kunci API, model, dan kuota), OTP (verifikasi WhatsApp dan aturan nomor), dan Admin (pengaturan akun admin). Perubahan di sana langsung berlaku tanpa restart.
+Konfigurasi adalah halaman pengaturan admin (menu Konfigurasi) dengan tiga tab: AI (provider Gemini/Groq, kunci API, model, dan kuota), OTP (verifikasi WhatsApp dan aturan nomor), dan Admin (pengaturan akun admin). Perubahan di sana langsung berlaku tanpa restart.
 
 ---
 

@@ -306,6 +306,9 @@ def test_patch_verified_providers_rejects_invalid(env):
     r = client.patch("/api/v2/admin/settings",
                      json={"settings": {"AI_VERIFIED_PROVIDERS": '["deepseek"]'}})
     assert r.status_code == 400
+    r = client.patch("/api/v2/admin/settings",
+                     json={"settings": {"AI_VERIFIED_PROVIDERS": '["nvidia"]'}})
+    assert r.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -335,8 +338,10 @@ def test_settings_returns_key_preview_not_full_key(env):
     assert m["GEMINI_API_KEY"]["preview"] == "AIza...1234"
     assert m["GEMINI_API_KEY"]["configured"] is True
     assert m["GROQ_API_KEY"]["preview"] == "gsk_...5678"
-    assert m["NVIDIA_API_KEY"]["preview"] == ""
-    assert m["NVIDIA_API_KEY"]["configured"] is False
+    # Kunci NVIDIA sudah tidak ada lagi (provider dihapus 2026-11-14).
+    assert "NVIDIA_API_KEY" not in m
+    assert "AI_MODEL_NVIDIA" not in m
+    assert "AI_NVIDIA_BASE_URL" not in m
 
 
 # ---------------------------------------------------------------------------
@@ -354,3 +359,123 @@ def test_chat_falls_back_locally_when_nothing_verified(env):
     data = r.json()
     assert data["status"] == "success"
     assert isinstance(data["response"], str) and len(data["response"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# 5. Penghapusan provider NVIDIA (2026-11-14, roboy: "ga kepake")
+#    Pola yang sama seperti penghapusan DeepSeek (backend e41c8ab).
+# ---------------------------------------------------------------------------
+
+def test_patch_provider_nvidia_rejected(env):
+    client, s = env
+    r = client.patch("/api/v2/admin/settings",
+                     json={"settings": {"AI_PROVIDER": "nvidia"}})
+    assert r.status_code == 400
+    assert "gemini" in r.json()["detail"] and "groq" in r.json()["detail"]
+
+
+def test_patch_nvidia_keys_rejected(env):
+    client, s = env
+    for key, value in [
+        ("NVIDIA_API_KEY", "nvapi-fakekey12345678"),
+        ("AI_MODEL_NVIDIA", "meta/llama-3.1-8b-instruct"),
+        ("AI_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+    ]:
+        r = client.patch("/api/v2/admin/settings",
+                         json={"settings": {key: value}})
+        assert r.status_code == 400, f"{key} seharusnya ditolak (di luar allowlist)"
+
+
+def test_detect_nvidia_key_rejected_without_network(env, monkeypatch):
+    client, s = env
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("detect NVIDIA tidak boleh memanggil jaringan")
+
+    monkeypatch.setattr("httpx.get", _no_network)
+    r = client.post("/api/v2/admin/settings/detect-provider",
+                    json={"api_key": "nvapi-fakekey12345678"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider"] is None
+    assert body["error"] == "NVIDIA tidak dipakai — hanya Gemini dan Groq"
+
+
+def test_stored_nvidia_provider_falls_back_to_gemini(env, monkeypatch):
+    from app.services.ai_assistant_service import _get_provider
+
+    client, s = env
+    _set(s, "AI_PROVIDER", "nvidia")
+    # _get_provider langsung: nilai tersimpan "nvidia" -> gemini.
+    assert _get_provider(s) == "gemini"
+    # test-ai tanpa provider: menguji provider aktif (jatuh ke gemini).
+    _set(s, "GEMINI_API_KEY", _GEMINI_KEY)
+    _set(s, "AI_MODEL", "gemini-3.5-flash-lite")
+    _fake_genai(monkeypatch)
+    r = client.post("/api/v2/admin/settings/test-ai", json={})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["provider"] == "gemini"
+
+
+def test_test_ai_requested_nvidia_tests_active_instead(env, monkeypatch):
+    """Body provider 'nvidia' tidak dikenal lagi -> yang diuji provider aktif."""
+    client, s = env
+    _set(s, "AI_PROVIDER", "gemini")
+    _set(s, "GEMINI_API_KEY", _GEMINI_KEY)
+    _set(s, "AI_MODEL", "gemini-3.5-flash-lite")
+    _fake_genai(monkeypatch)
+
+    r = client.post("/api/v2/admin/settings/test-ai", json={"provider": "nvidia"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["provider"] == "gemini"
+
+
+def test_verified_list_ignores_and_cleans_nvidia(env, monkeypatch):
+    from app.routes.admin_api import _get_verified_providers
+
+    client, s = env
+    # "nvidia" di daftar tersimpan diabaikan saat dibaca internal
+    # (frontend juga menyaringnya saat render).
+    _set(s, "AI_VERIFIED_PROVIDERS", '["gemini", "nvidia"]')
+    assert _get_verified_providers(s) == ["gemini"]
+    # Penulisan berikutnya (hasil test-ai sukses) membersihkannya.
+    _set(s, "AI_VERIFIED_PROVIDERS", '["nvidia"]')
+    _set(s, "GEMINI_API_KEY", _GEMINI_KEY)
+    _set(s, "AI_MODEL", "gemini-3.5-flash-lite")
+    _fake_genai(monkeypatch)
+    r = client.post("/api/v2/admin/settings/test-ai", json={"provider": "gemini"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert _verified(client) == ["gemini"]
+
+
+def test_detect_groq_still_works(env, monkeypatch):
+    """Detect Groq tetap jalan setelah NVIDIA dihapus (filter chat tetap)."""
+    client, s = env
+
+    class _Resp:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    def _fake_get(url, **kwargs):
+        if "groq.com" in url:
+            return _Resp(200, {"data": [
+                {"id": "llama-3.3-70b-versatile"},
+                {"id": "llama-3.1-8b-instant"},
+                {"id": "whisper-large-v3-turbo"},  # bukan chat -> disaring
+            ]})
+        return _Resp(401)
+
+    monkeypatch.setattr("httpx.get", _fake_get)
+    r = client.post("/api/v2/admin/settings/detect-provider",
+                    json={"api_key": "gsk_fakekey12345678"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider"] == "groq"
+    assert body["models"] == ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
