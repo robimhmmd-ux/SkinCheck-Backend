@@ -1078,6 +1078,15 @@ SETTING_DEFS = [
     # app/services/ai_assistant_service.py), didokumentasikan di
     # docs/aturan-jawaban-ai.md.
     ("AI_PROVIDER", "gemini", False),
+    # Daftar provider yang TERVERIFIKASI (2026-11-14): JSON array provider
+    # yang kuncinya tersimpan DAN tes terakhirnya lolos, mis. '["gemini"]'.
+    # Hanya ditulis backend dari hasil test-ai (sukses -> tambah, gagal ->
+    # hapus) dan dihapus saat kunci/model provider itu diubah via PATCH.
+    # Bilah provider di frontend hanya menampilkan provider terverifikasi
+    # sebagai tombol pilih. Semua provider mulai belum-terverifikasi
+    # (tidak ada catatan tes sebelumnya) — admin menguji tiap provider
+    # sekali lewat tombol "Uji" / modal tambah-key. Default "[]" (kosong).
+    ("AI_VERIFIED_PROVIDERS", "[]", False),
     ("AI_MODEL_NVIDIA", "meta/llama-3.1-8b-instruct", False),
     ("AI_MODEL_GROQ", "llama-3.3-70b-versatile", False),
     ("AI_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1", False),
@@ -1106,6 +1115,114 @@ SETTING_DEFS = [
 
 # Allowlist PATCH: kunci di luar daftar ini ditolak (400).
 SETTINGS_ALLOWLIST = {key for key, _, _ in SETTING_DEFS}
+
+# ── Status terverifikasi provider AI (2026-11-14) ──
+# Satu setting JSON (AI_VERIFIED_PROVIDERS) berisi daftar provider yang
+# kuncinya tersimpan DAN tes terakhirnya lolos. Dipakai bilah provider di
+# frontend: hanya provider terverifikasi yang tampil sebagai tombol pilih.
+AI_VERIFIED_PROVIDERS_KEY = "AI_VERIFIED_PROVIDERS"
+
+# Kunci/model/base-URL tiap provider — mengubah salah satunya via PATCH
+# menghapus tanda terverifikasi provider itu (harus uji ulang).
+_PROVIDER_SETTING_KEYS = {
+    "gemini": ("GEMINI_API_KEY", "AI_MODEL"),
+    "nvidia": ("NVIDIA_API_KEY", "AI_MODEL_NVIDIA", "AI_NVIDIA_BASE_URL"),
+    "groq": ("GROQ_API_KEY", "AI_MODEL_GROQ", "AI_GROQ_BASE_URL"),
+}
+
+# Model Gemini GRATIS yang benar-benar jalan dengan kunci baru
+# (2026-11-14). Google mempensiunkan 1.5, mematikan 2.0 (1 Jun 2026),
+# dan 2.5 hanya untuk pengguna lama — kunci baru mendapat 404 untuk
+# ketiganya. Detect-provider hanya mengembalikan model-model ini (+
+# model yang sedang terkonfigurasi, supaya tidak hilang dari daftarnya).
+_GEMINI_FREE_MODEL_ALLOWLIST = (
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.8-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+)
+
+
+def _get_verified_providers(db: Session) -> list:
+    """Daftar provider terverifikasi (dari AI_VERIFIED_PROVIDERS)."""
+    raw = SystemSetting.get_value(db, AI_VERIFIED_PROVIDERS_KEY, "[]") or "[]"
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [p for p in data if p in ("gemini", "nvidia", "groq")]
+
+
+def _set_verified_providers(db: Session, providers) -> None:
+    clean = [p for p in dict.fromkeys(providers or []) if p in ("gemini", "nvidia", "groq")]
+    SystemSetting.set_value(db, AI_VERIFIED_PROVIDERS_KEY, json.dumps(clean))
+
+
+def _mark_provider_verified(db: Session, provider: str, verified: bool) -> None:
+    """Tandai/hapus tanda terverifikasi satu provider (persist)."""
+    if provider not in ("gemini", "nvidia", "groq"):
+        return
+    current = _get_verified_providers(db)
+    if verified:
+        if provider not in current:
+            current.append(provider)
+    else:
+        current = [p for p in current if p != provider]
+    _set_verified_providers(db, current)
+
+
+def _key_preview(raw_value) -> str:
+    """Preview kunci untuk frontend: 4 karakter awal + '...' + 4 akhir.
+    TIDAK PERNAH mengembalikan kunci lengkap. Kunci <= 8 karakter tidak
+    di-preview (terlalu pendek untuk disamarkan dengan aman)."""
+    v = (raw_value or "").strip()
+    if len(v) <= 8:
+        return ""
+    return f"{v[:4]}...{v[-4:]}"
+
+
+def _filter_gemini_free_models(models, configured_model=None):
+    """Iris daftar model Gemini ke model GRATIS yang benar-benar jalan
+    (allowlist) + model yang sedang terkonfigurasi. Urutan mengikuti
+    allowlist (3.5-flash-lite dulu); model terkonfigurasi yang di luar
+    allowlist ditempel di akhir supaya tidak hilang dari daftarnya."""
+    raw = [m for m in (models or []) if m in _GEMINI_FREE_MODEL_ALLOWLIST]
+    ordered = [m for m in _GEMINI_FREE_MODEL_ALLOWLIST if m in raw]
+    if configured_model:
+        cm = (configured_model or "").strip()
+        if cm and cm not in ordered:
+            ordered.append(cm)
+    return ordered
+
+
+def _apply_test_ai_result(db: Session, provider: str, ok: bool) -> None:
+    """Catat hasil test-ai: sukses -> tandai terverifikasi; gagal -> hapus
+    tanda. Bila provider AKTIF yang gagal, seleksi aktif jatuh ke provider
+    terverifikasi lain (utamakan Gemini) atau ke 'gemini' bila tidak ada
+    yang terverifikasi (chat lalu memakai jalur fallback lokal). Tidak
+    pernah raise — kegagalan pencatatan tidak boleh merusak respons tes."""
+    try:
+        _mark_provider_verified(db, provider, ok)
+        if ok:
+            return
+        active = (SystemSetting.get_value(db, "AI_PROVIDER", "gemini") or "gemini").strip().lower()
+        if active != provider:
+            return
+        verified = _get_verified_providers(db)
+        fallback = "gemini"
+        for cand in ("gemini", "nvidia", "groq"):
+            if cand in verified:
+                fallback = cand
+                break
+        if fallback != active:
+            SystemSetting.set_value(db, "AI_PROVIDER", fallback)
+            logger.info(f"Provider aktif {provider} gagal dites; AI_PROVIDER dialihkan ke {fallback}.")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Gagal mencatat hasil test-ai untuk {provider}: {e}")
+
 
 # Kunci yang perilakunya benar-benar dibaca kode saat ini:
 # - AI_MODEL / AI_MAX_TOKENS / AI_TEMPERATURE / AI_SIMULATION_MODE dibaca
@@ -1145,6 +1262,13 @@ async def admin_get_settings(request: Request, db: Session = Depends(get_db)):
             elif key == "MAIL_PASSWORD":
                 env_fallback = settings.MAIL_PASSWORD
             configured = bool(raw or env_fallback)
+            # Preview kunci AI untuk frontend (2026-11-14): 4 awal + ... +
+            # 4 akhir dari nilai tersimpan di DB — TIDAK PERNAH kunci
+            # lengkap. Bila kosong, preview kosong (frontend menampilkan
+            # "Terpasang" dari `configured`).
+            preview = ""
+            if key in ("GEMINI_API_KEY", "NVIDIA_API_KEY", "GROQ_API_KEY") and raw:
+                preview = _key_preview(raw)
             if is_secret:
                 # Mask total: hanya penanda, bukan nilai.
                 value = "tersimpan" if configured else ""
@@ -1156,6 +1280,7 @@ async def admin_get_settings(request: Request, db: Session = Depends(get_db)):
                     "value": value,
                     "configured": configured,
                     "masked": is_secret,
+                    "preview": preview,
                     "description": row.description if row else None,
                 }
             )
@@ -1170,6 +1295,7 @@ async def admin_get_settings(request: Request, db: Session = Depends(get_db)):
                     "value": "tersimpan" if (secret and row.value) else ("" if secret else (row.value or "")),
                     "configured": bool(row.value),
                     "masked": secret,
+                    "preview": "",
                     "description": row.description,
                 }
             )
@@ -1246,8 +1372,25 @@ async def admin_patch_settings(
                 normalized[key] = "off"
             else:
                 return JSONResponse(status_code=400, content={"detail": "ALLOW_SAME_PHONE_NUMBER harus 'on' atau 'off'."})
+        elif key == "AI_VERIFIED_PROVIDERS":
+            # Ditulis backend dari hasil test-ai; PATCH langsung hanya
+            # diterima bila berupa daftar JSON provider yang dikenal
+            # (frontend tidak pernah mengirim kunci ini).
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                return JSONResponse(status_code=400, content={"detail": "AI_VERIFIED_PROVIDERS harus berupa daftar JSON provider."})
+            if not isinstance(parsed, list) or any(p not in ("gemini", "nvidia", "groq") for p in parsed):
+                return JSONResponse(status_code=400, content={"detail": "AI_VERIFIED_PROVIDERS hanya boleh berisi gemini/nvidia/groq."})
+            normalized[key] = json.dumps([p for p in dict.fromkeys(parsed)])
         else:
             normalized[key] = text
+    # Nilai lama kunci/model/base-URL AI — untuk invalidasi flag
+    # terverifikasi bila nilainya BENAR-BENAR berubah (simpan tab yang
+    # tidak mengubah apa-apa tidak boleh menghapus tanda).
+    _old_ai_values = {}
+    for _k in ("GEMINI_API_KEY", "AI_MODEL", "NVIDIA_API_KEY", "AI_MODEL_NVIDIA", "AI_NVIDIA_BASE_URL", "GROQ_API_KEY", "AI_MODEL_GROQ", "AI_GROQ_BASE_URL"):
+        _old_ai_values[_k] = SystemSetting.get_value(db, _k) or ""
     try:
         changed = []
         for key, value in normalized.items():
@@ -1258,6 +1401,16 @@ async def admin_patch_settings(
         db.rollback()
         return _db_unavailable()
     if changed:
+        # Kunci/model/base-URL provider yang nilainya berubah -> hapus
+        # tanda terverifikasi provider itu (harus uji ulang). AI_PROVIDER
+        # sendiri tidak mengubah tanda.
+        _affected = set()
+        for _key in changed:
+            for _prov, _keys in _PROVIDER_SETTING_KEYS.items():
+                if _key in _keys and normalized.get(_key, "") != _old_ai_values.get(_key, ""):
+                    _affected.add(_prov)
+        for _prov in sorted(_affected):
+            _mark_provider_verified(db, _prov, False)
         _log_activity(
             db, request, admin["id"], f"Admin mengubah pengaturan: {', '.join(changed)}"
         )
@@ -1297,17 +1450,33 @@ async def admin_test_db(request: Request, db: Session = Depends(get_db)):
     )
 
 
+class TestAiIn(BaseModel):
+    # Provider yang diuji — bila kosong/invalid, yang diuji adalah provider
+    # AKTIF (AI_PROVIDER). Dipakai tombol "Uji" per provider + auto-test
+    # modal tambah-key (provider yang baru disimpan belum tentu aktif).
+    provider: Optional[str] = None
+
+
 @router.post("/settings/test-ai")
-async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
+async def admin_test_ai(
+    request: Request, body: Optional[TestAiIn] = None, db: Session = Depends(get_db)
+):
     admin = _require_admin(request)
     t0 = time.time()
-    # Mengetes provider yang AKTIF (AI_PROVIDER): nvidia/groq ->
-    # endpoint OpenAI-compatible masing-masing; gemini -> seperti sebelumnya.
-    # Nilai tersimpan yang tidak dikenal (mis. "deepseek" lama, sebelum
-    # provider itu dihapus 2026-11-14) jatuh ke gemini.
-    provider = (SystemSetting.get_value(db, "AI_PROVIDER", "gemini") or "gemini").strip().lower()
-    if provider not in ("gemini", "nvidia", "groq"):
-        provider = "gemini"
+    # Provider yang diuji: yang diminta di body (tombol "Uji" / auto-test
+    # modal) atau yang AKTIF (AI_PROVIDER) bila tidak diminta. Nilai
+    # tersimpan yang tidak dikenal (mis. "deepseek" lama, sebelum provider
+    # itu dihapus 2026-11-14) jatuh ke gemini. Hasil tes dicatat ke flag
+    # terverifikasi: sukses -> tandai, gagal -> hapus tanda (+ bila yang
+    # gagal adalah provider aktif, seleksi aktif jatuh ke terverifikasi
+    # lain — lihat _apply_test_ai_result).
+    requested = (body.provider or "").strip().lower() if body and body.provider else ""
+    if requested in ("gemini", "nvidia", "groq"):
+        provider = requested
+    else:
+        provider = (SystemSetting.get_value(db, "AI_PROVIDER", "gemini") or "gemini").strip().lower()
+        if provider not in ("gemini", "nvidia", "groq"):
+            provider = "gemini"
     if provider in ("nvidia", "groq"):
         from app.services.ai_assistant_service import (
             OPENAI_COMPATIBLE_PROVIDERS,
@@ -1319,6 +1488,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
         model_name = (SystemSetting.get_value(db, cfg["model_setting"], cfg["model_default"]) or cfg["model_default"]).strip() or cfg["model_default"]
         api_key = (SystemSetting.get_value(db, cfg["key_setting"], "") or "").strip()
         if not api_key:
+            _apply_test_ai_result(db, provider, False)
             return JSONResponse(
                 content={
                     "ok": False,
@@ -1333,6 +1503,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
         )
         latency_ms = round((time.time() - t0) * 1000, 1)
         if not sample:
+            _apply_test_ai_result(db, provider, False)
             return JSONResponse(
                 content={
                     "ok": False,
@@ -1342,6 +1513,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
                     "detail": f"Gagal menghubungi {label} (cek kunci, nama model, dan koneksi).",
                 }
             )
+        _apply_test_ai_result(db, provider, True)
         _log_activity(
             db, request, admin["id"], f"Admin menguji koneksi {label} ({model_name}, {latency_ms} ms)"
         )
@@ -1358,6 +1530,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
     api_key = (SystemSetting.get_value(db, "GEMINI_API_KEY", settings.GEMINI_API_KEY) or "").strip()
     model_name = (SystemSetting.get_value(db, "AI_MODEL", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
     if not api_key:
+        _apply_test_ai_result(db, "gemini", False)
         return JSONResponse(
             content={
                 "ok": False,
@@ -1379,6 +1552,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
         latency_ms = round((time.time() - t0) * 1000, 1)
         sample = (response.text or "").strip()[:500]
     except ImportError:
+        _apply_test_ai_result(db, "gemini", False)
         return JSONResponse(
             content={
                 "ok": False,
@@ -1389,6 +1563,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
             }
         )
     except Exception as e:  # noqa: BLE001
+        _apply_test_ai_result(db, "gemini", False)
         return JSONResponse(
             content={
                 "ok": False,
@@ -1398,6 +1573,7 @@ async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
                 "detail": f"Gagal menghubungi Gemini: {e}",
             }
         )
+    _apply_test_ai_result(db, "gemini", True)
     _log_activity(
         db, request, admin["id"], f"Admin menguji koneksi Gemini ({model_name}, {latency_ms} ms)"
     )
@@ -1446,6 +1622,15 @@ async def admin_detect_provider(request: Request, body: DetectProviderIn, db: Se
 
     provider, models, error = detect_provider_from_key(api_key, url_overrides=url_overrides or None)
     if provider:
+        if provider == "gemini":
+            # 2026-11-14: Google mengembalikan puluhan model (termasuk
+            # 1.5, 2.0, 2.5 yang sudah mati/tidak jalan untuk kunci baru).
+            # Modal hanya menawarkan model GRATIS yang benar-benar jalan
+            # + model yang sedang terkonfigurasi (supaya tidak hilang dari
+            # daftarnya sendiri). Penyaringan di sini (batas API), bukan
+            # di detect_provider_from_key — fungsi itu tidak berubah.
+            configured = (SystemSetting.get_value(db, "AI_MODEL", "") or "").strip()
+            models = _filter_gemini_free_models(models, configured)
         _log_activity(db, request, admin["id"], f"Admin mendeteksi provider AI: {provider} ({len(models)} model)")
         return JSONResponse(content={"provider": provider, "models": models})
     return JSONResponse(
