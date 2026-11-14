@@ -1069,21 +1069,19 @@ SETTING_DEFS = [
     ("AI_MAX_TOKENS", "1024", False),
     ("AI_TEMPERATURE", "0.7", False),
     ("AI_SIMULATION_MODE", "off", False),
-    # Provider AI (2026-11-13, tambah Groq/DeepSeek 2026-11-14): "gemini"
-    # (Google AI Studio) atau "nvidia"/"groq"/"deepseek" (endpoint
-    # OpenAI-compatible). AI_MODEL = model Gemini, AI_MODEL_NVIDIA =
-    # model NVIDIA, AI_MODEL_GROQ = model Groq, AI_MODEL_DEEPSEEK = model
-    # DeepSeek. Aturan jawaban (system prompt) TIDAK lagi di database —
-    # aturan bawaan di kode (CUSTOMER/ADMIN_SYSTEM_PROMPT di
+    # Provider AI (2026-11-13, tambah Groq 2026-11-14; DeepSeek DIHAPUS
+    # 2026-11-14 karena berbayar — hanya provider gratis): "gemini"
+    # (Google AI Studio) atau "nvidia"/"groq" (endpoint OpenAI-compatible).
+    # AI_MODEL = model Gemini, AI_MODEL_NVIDIA = model NVIDIA,
+    # AI_MODEL_GROQ = model Groq. Aturan jawaban (system prompt) TIDAK lagi
+    # di database — aturan bawaan di kode (CUSTOMER/ADMIN_SYSTEM_PROMPT di
     # app/services/ai_assistant_service.py), didokumentasikan di
     # docs/aturan-jawaban-ai.md.
     ("AI_PROVIDER", "gemini", False),
     ("AI_MODEL_NVIDIA", "meta/llama-3.1-8b-instruct", False),
     ("AI_MODEL_GROQ", "llama-3.3-70b-versatile", False),
-    ("AI_MODEL_DEEPSEEK", "deepseek-chat", False),
     ("AI_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1", False),
     ("AI_GROQ_BASE_URL", "https://api.groq.com/openai/v1", False),
-    ("AI_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1", False),
     ("SCAN_DAILY_QUOTA", "", False),  # kosong = tanpa batas (default aman)
     ("OTP_MODE", "", False),
     # REGISTRATION_OTP_MODE (2026-11-12): KUNCI INI WAJIB ADA — frontend tab
@@ -1099,7 +1097,6 @@ SETTING_DEFS = [
     ("GEMINI_API_KEY", "", True),
     ("NVIDIA_API_KEY", "", True),
     ("GROQ_API_KEY", "", True),
-    ("DEEPSEEK_API_KEY", "", True),
     ("FONNTE_TOKEN", "", True),
     ("WA_API_TOKEN", "", True),
     ("MAIL_USERNAME", "", False),
@@ -1220,14 +1217,10 @@ async def admin_patch_settings(
             if not text:
                 return JSONResponse(status_code=400, content={"detail": "AI_MODEL_GROQ tidak boleh kosong."})
             normalized[key] = text
-        elif key == "AI_MODEL_DEEPSEEK":
-            if not text:
-                return JSONResponse(status_code=400, content={"detail": "AI_MODEL_DEEPSEEK tidak boleh kosong."})
-            normalized[key] = text
         elif key == "AI_PROVIDER":
             low = text.lower()
-            if low not in ("gemini", "nvidia", "groq", "deepseek"):
-                return JSONResponse(status_code=400, content={"detail": "AI_PROVIDER harus 'gemini', 'nvidia', 'groq', atau 'deepseek'."})
+            if low not in ("gemini", "nvidia", "groq"):
+                return JSONResponse(status_code=400, content={"detail": "AI_PROVIDER harus 'gemini', 'nvidia', atau 'groq'."})
             normalized[key] = low
         elif key == "AI_TEMPERATURE":
             try:
@@ -1308,12 +1301,14 @@ async def admin_test_db(request: Request, db: Session = Depends(get_db)):
 async def admin_test_ai(request: Request, db: Session = Depends(get_db)):
     admin = _require_admin(request)
     t0 = time.time()
-    # Mengetes provider yang AKTIF (AI_PROVIDER): nvidia/groq/deepseek ->
+    # Mengetes provider yang AKTIF (AI_PROVIDER): nvidia/groq ->
     # endpoint OpenAI-compatible masing-masing; gemini -> seperti sebelumnya.
+    # Nilai tersimpan yang tidak dikenal (mis. "deepseek" lama, sebelum
+    # provider itu dihapus 2026-11-14) jatuh ke gemini.
     provider = (SystemSetting.get_value(db, "AI_PROVIDER", "gemini") or "gemini").strip().lower()
-    if provider not in ("gemini", "nvidia", "groq", "deepseek"):
+    if provider not in ("gemini", "nvidia", "groq"):
         provider = "gemini"
-    if provider in ("nvidia", "groq", "deepseek"):
+    if provider in ("nvidia", "groq"):
         from app.services.ai_assistant_service import (
             OPENAI_COMPATIBLE_PROVIDERS,
             _call_openai_compatible_chat,
@@ -1427,12 +1422,13 @@ async def admin_detect_provider(request: Request, body: DetectProviderIn, db: Se
     """Auto-deteksi provider dari satu API key (tanpa menyimpan key).
 
     Mencoba key ke endpoint list-model tiap provider (Gemini, NVIDIA,
-    Groq, DeepSeek); provider pertama yang menjawab 200 + daftar
+    Groq); provider pertama yang menjawab 200 + daftar
     modelnya dikembalikan. Key HANYA dipakai di memori selama deteksi:
     tidak disimpan ke database, tidak di-log, tidak dikembalikan ke
     client. Urutan pengecekan: petunjuk format key dulu, lalu
-    groq → deepseek → nvidia → gemini (lihat detect_provider_from_key
-    di ai_assistant_service).
+    groq → nvidia → gemini (lihat detect_provider_from_key
+    di ai_assistant_service). DeepSeek TIDAK didukung (berbayar):
+    kunci "sk-" langsung ditolak dengan pesan yang jelas.
     """
     admin = _require_admin(request)
     api_key = (body.api_key or "").strip()
@@ -1443,7 +1439,7 @@ async def admin_detect_provider(request: Request, body: DetectProviderIn, db: Se
     # selalu dipakai URL asli tiap provider.
     url_overrides = {
         p: os.environ.get(f"DETECT_{p.upper()}_MODELS_URL", "")
-        for p in ("gemini", "nvidia", "groq", "deepseek")
+        for p in ("gemini", "nvidia", "groq")
     }
     url_overrides = {p: u for p, u in url_overrides.items() if u}
     from app.services.ai_assistant_service import detect_provider_from_key

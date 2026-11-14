@@ -982,12 +982,11 @@ NVIDIA_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_DEFAULT_MODEL = "meta/llama-3.1-8b-instruct"
 GROQ_DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
-DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 
-# Provider AI yang didukung (2026-11-14): gemini (Google AI Studio) +
-# tiga provider OpenAI-compatible (NVIDIA, Groq, DeepSeek) yang semuanya
-# memakai endpoint /chat/completions yang sama. Konfigurasi per provider:
+# Provider AI yang didukung (2026-11-14; DeepSeek DIHAPUS 2026-11-14 karena
+# berbayar — hanya provider gratis): gemini (Google AI Studio) + dua
+# provider OpenAI-compatible (NVIDIA, Groq) yang keduanya memakai
+# endpoint /chat/completions yang sama. Konfigurasi per provider:
 # key_setting = kunci secret di system_settings, model_setting = nama
 # model, base_url_setting = alamat endpoint (bisa di-override admin;
 # override dipakai juga untuk mengarahkan ke stub saat tes lokal).
@@ -1010,18 +1009,9 @@ OPENAI_COMPATIBLE_PROVIDERS = {
         "base_url_default": GROQ_DEFAULT_BASE_URL,
         "models_url": "https://api.groq.com/openai/v1/models",
     },
-    "deepseek": {
-        "label": "DeepSeek",
-        "key_setting": "DEEPSEEK_API_KEY",
-        "model_setting": "AI_MODEL_DEEPSEEK",
-        "model_default": DEEPSEEK_DEFAULT_MODEL,
-        "base_url_setting": "AI_DEEPSEEK_BASE_URL",
-        "base_url_default": DEEPSEEK_DEFAULT_BASE_URL,
-        "models_url": "https://api.deepseek.com/v1/models",
-    },
 }
 
-AI_PROVIDERS = ("gemini", "nvidia", "groq", "deepseek")
+AI_PROVIDERS = ("gemini", "nvidia", "groq")
 
 
 def _get_provider(db: Session) -> str:
@@ -1052,8 +1042,8 @@ def _openai_compatible_config(db: Session, provider: str):
 
 
 def _call_openai_compatible_chat(db: Session, provider: str, prompt_input: str) -> Optional[str]:
-    """Satu panggilan chat ke endpoint OpenAI-compatible (NVIDIA/Groq/
-    DeepSeek), dengan prompt rakitan yang SAMA PERSIS seperti yang diterima
+    """Satu panggilan chat ke endpoint OpenAI-compatible (NVIDIA/Groq),
+    dengan prompt rakitan yang SAMA PERSIS seperti yang diterima
     Gemini (hasil _build_prompt) supaya semua provider tidak pernah
     menyimpang. Mengembalikan teks jawaban, atau None bila apa pun gagal
     — pemanggil wajib jatuh ke fallback lokal (chat tidak pernah 500
@@ -1101,18 +1091,19 @@ def _call_nvidia_chat(db: Session, prompt_input: str) -> Optional[str]:
 # ── Auto-deteksi provider dari API key (2026-11-14) ──
 # Endpoint /settings/detect-provider mencoba key ke /models tiap provider.
 # Hanya HTTP 200 yang dihitung cocok. Urutan: petunjuk format key dulu
-# (gsk_ = Groq, nvapi- = NVIDIA, AIza = Gemini, sk- = DeepSeek), lalu
-# sisanya dengan urutan tetap groq → deepseek → nvidia → gemini. Urutan
-# TIDAK bisa salah mengenali: satu key praktis hanya valid di satu
-# provider, dan provider lain menjawab 401. Key TIDAK PERNAH disimpan
-# atau di-log — hanya dipakai di memori selama deteksi.
+# (gsk_ = Groq, nvapi- = NVIDIA, AIza = Gemini), lalu sisanya dengan
+# urutan tetap groq → nvidia → gemini. Urutan TIDAK bisa salah mengenali:
+# satu key praktis hanya valid di satu provider, dan provider lain
+# menjawab 401. Key TIDAK PERNAH disimpan atau di-log — hanya dipakai di
+# memori selama deteksi. DeepSeek TIDAK didukung (berbayar, 2026-11-14):
+# kunci "sk-" langsung ditolak dengan pesan yang jelas (lihat
+# detect_provider_from_key) dan tidak pernah dicoba ke endpoint mana pun.
 _DETECT_TIMEOUT = 8.0
-_DETECT_ORDER = ("groq", "deepseek", "nvidia", "gemini")
+_DETECT_ORDER = ("groq", "nvidia", "gemini")
 _DETECT_KEY_PREFIXES = (
     ("gsk_", "groq"),
     ("nvapi-", "nvidia"),
     ("AIza", "gemini"),
-    ("sk-", "deepseek"),
 )
 _GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
@@ -1130,7 +1121,7 @@ def _detect_provider_order(api_key: str):
 
 
 # ── Saringan model chat untuk auto-deteksi (2026-11-14) ──
-# Endpoint /models NVIDIA (juga Groq/DeepSeek) mengembalikan SEMUA model,
+# Endpoint /models NVIDIA (juga Groq) mengembalikan SEMUA model,
 # termasuk yang BUKAN model chat: embedding, reranker, deteksi video,
 # guardrail, kalibrasi, TTS/STT, dsb. Chatbot hanya memakai
 # /chat/completions, jadi daftar deteksi disaring ke model chat saja.
@@ -1182,6 +1173,16 @@ def detect_provider_from_key(api_key: str, timeout: float = _DETECT_TIMEOUT, url
     key = (api_key or "").strip()
     if not key:
         return None, [], "api_key wajib diisi."
+    if key.startswith("sk-"):
+        # DeepSeek tidak didukung (berbayar, 2026-11-14): kuncinya memang
+        # berawalan sk-, tapi providernya sudah dihapus — jangan coba ke
+        # endpoint mana pun, langsung jawab dengan pesan yang jelas.
+        return (
+            None,
+            [],
+            "Kunci ini milik DeepSeek — DeepSeek tidak didukung karena berbayar. "
+            "Pakai Gemini, NVIDIA, atau Groq (gratis).",
+        )
     last_error = "Tidak ada provider yang mengenali kunci ini."
     for provider in _detect_provider_order(key):
         url = _detect_models_url(provider, url_overrides)
@@ -1265,7 +1266,7 @@ _TABLES_TEXT = f"Database aplikasi (TiDB) punya {len(DB_TABLES)} tabel:\n" + "\n
 # Pengaturan sistem NON-RAHASIA yang boleh disebut nilainya oleh chatbot.
 # (key, label tampil, penjelasan, nilai default)
 # Kunci rahasia (GEMINI_API_KEY, NVIDIA_API_KEY, GROQ_API_KEY,
-# DEEPSEEK_API_KEY, FONNTE_TOKEN, WA_API_TOKEN, MAIL_PASSWORD) TIDAK ada
+# FONNTE_TOKEN, WA_API_TOKEN, MAIL_PASSWORD) TIDAK ada
 # di sini — nilainya tidak pernah disebut.
 # Catatan jujur: VGG_THRESHOLD, OTP_MODE, dan REGISTRATION_OTP_MODE tersimpan
 # di database tapi TIDAK dibaca backend yang live (hanya controller lama yang
@@ -1275,14 +1276,12 @@ SETTINGS_INFO = [
     ("SCAN_DAILY_QUOTA", "Kuota scan harian", "batas berapa kali satu pengguna boleh scan dalam sehari; kosong berarti tanpa batas, dan akun tamu (Tester) tidak dihitung kuotanya", ""),
     ("MAINTENANCE_MODE", "Maintenance mode", "kalau aktif, customer tidak bisa upload scan (admin tetap bisa); scan ditolak dengan pesan layanan sedang perawatan", "off"),
     ("ALLOW_SAME_PHONE_NUMBER", "Nomor WhatsApp boleh dipakai lebih dari satu akun", "kalau aktif, satu nomor WhatsApp boleh dipakai beberapa akun (kode OTP dikirim per nomor); kalau mati, daftar dengan nomor yang sudah dipakai akun lain ditolak", "off"),
-    ("AI_PROVIDER", "Provider AI chatbot", "penyedia AI yang dipakai chatbot: gemini (Google), nvidia (model Llama lewat API OpenAI-compatible), groq, atau deepseek (keduanya OpenAI-compatible)", "gemini"),
+    ("AI_PROVIDER", "Provider AI chatbot", "penyedia AI yang dipakai chatbot: gemini (Google), nvidia (model Llama lewat API OpenAI-compatible), atau groq (OpenAI-compatible)", "gemini"),
     ("AI_MODEL", "Model Gemini", "nama model Gemini yang dipakai chatbot", "gemini-3.5-flash-lite"),
     ("AI_MODEL_NVIDIA", "Model NVIDIA", "nama model NVIDIA yang dipakai kalau providernya nvidia", "meta/llama-3.1-8b-instruct"),
     ("AI_MODEL_GROQ", "Model Groq", "nama model Groq yang dipakai kalau providernya groq", "llama-3.3-70b-versatile"),
-    ("AI_MODEL_DEEPSEEK", "Model DeepSeek", "nama model DeepSeek yang dipakai kalau providernya deepseek", "deepseek-chat"),
     ("AI_NVIDIA_BASE_URL", "Alamat API NVIDIA", "alamat endpoint API NVIDIA (OpenAI-compatible)", "https://integrate.api.nvidia.com/v1"),
     ("AI_GROQ_BASE_URL", "Alamat API Groq", "alamat endpoint API Groq (OpenAI-compatible)", "https://api.groq.com/openai/v1"),
-    ("AI_DEEPSEEK_BASE_URL", "Alamat API DeepSeek", "alamat endpoint API DeepSeek (OpenAI-compatible)", "https://api.deepseek.com/v1"),
     ("AI_MAX_TOKENS", "Batas panjang jawaban AI", "jumlah token maksimum jawaban chatbot", "1024"),
     ("AI_TEMPERATURE", "Temperatur AI", "seberapa bebas/kreatif jawaban chatbot (0 sampai 2)", "0.7"),
     ("AI_SIMULATION_MODE", "Mode simulasi AI", "kalau aktif, chatbot selalu memakai jawaban lokal dan tidak memanggil provider AI sama sekali", "off"),
@@ -2092,10 +2091,10 @@ APP_GLOSSARY = [
      "Admin adalah pengelola aplikasi: dia bisa melihat dan mengatur pengguna, produk, audit scan, tren kulit, obrolan customer, konfigurasi, dan log aktivitas. Admin juga bisa menangguhkan atau menonaktifkan akun, dan mengubah status verifikasi pengguna."),
     ("Customer", ["customer", "pengguna"],
      "Customer adalah pengguna biasa aplikasi: dia bisa scan kulit, melihat dashboard dan riwayat diagnosisnya, belanja di marketplace, dan chat dengan asisten AI — tapi hanya soal akun dan kulitnya sendiri, bukan data pengguna lain."),
-    ("Provider AI (Gemini / NVIDIA / Groq / DeepSeek)", ["provider ai", "provider", "model ai", "gemini", "nvidia", "groq", "deepseek", "kunci api", "api key", "api keys"],
-     "Chatbot Laomera bisa memakai empat penyedia AI: Gemini (Google), NVIDIA (model Llama lewat API yang kompatibel dengan OpenAI), Groq, atau DeepSeek (keduanya juga OpenAI-compatible). Admin memilihnya di Konfigurasi → tab AI, mengisi kunci API-nya, dan perubahannya langsung berlaku tanpa restart. Kalau kuncinya salah atau providernya mati, chatbot tetap menjawab dari jawaban lokal, bukan error."),
+    ("Provider AI (Gemini / NVIDIA / Groq)", ["provider ai", "provider", "model ai", "gemini", "nvidia", "groq", "kunci api", "api key", "api keys"],
+     "Chatbot Laomera bisa memakai tiga penyedia AI gratis: Gemini (Google), NVIDIA (model Llama lewat API yang kompatibel dengan OpenAI), atau Groq (juga OpenAI-compatible). Admin memilihnya di Konfigurasi → tab AI, mengisi kunci API-nya, dan perubahannya langsung berlaku tanpa restart. Kalau kuncinya salah atau providernya mati, chatbot tetap menjawab dari jawaban lokal, bukan error."),
     ("Konfigurasi admin", ["konfigurasi", "pengaturan", "settings"],
-     "Konfigurasi adalah halaman pengaturan admin (menu Konfigurasi) dengan tiga tab: AI (provider Gemini/NVIDIA/Groq/DeepSeek, kunci API, model, dan kuota), OTP (verifikasi WhatsApp dan aturan nomor), dan Admin (pengaturan akun admin). Perubahan di sana langsung berlaku tanpa restart."),
+     "Konfigurasi adalah halaman pengaturan admin (menu Konfigurasi) dengan tiga tab: AI (provider Gemini/NVIDIA/Groq, kunci API, model, dan kuota), OTP (verifikasi WhatsApp dan aturan nomor), dan Admin (pengaturan akun admin). Perubahan di sana langsung berlaku tanpa restart."),
     ("Teknologi aplikasi", ["teknologi", "next.js", "nextjs", "fastapi", "vercel", "frontend", "backend", "dibangun dengan", "dibuat dengan"],
      "Aplikasi ini dibangun dengan frontend Next.js dan backend FastAPI, dan di-hosting di Vercel — setiap kali ada perubahan kode yang di-push ke GitHub, websitenya langsung diperbarui otomatis."),
     ("Fitur aplikasi", ["fitur"],
@@ -2305,7 +2304,7 @@ class AIOrchestrator:
         """Assemble the exact prompt chat() used to build inline, so the
         streaming and non-streaming paths cannot drift apart."""
         # Glosarium ringkas (hanya kalau pertanyaannya memang definisi) supaya
-        # jalur pintar (Gemini/NVIDIA/Groq/DeepSeek) juga bisa menjawab "apa itu ...?" dari
+        # jalur pintar (Gemini/NVIDIA/Groq) juga bisa menjawab "apa itu ...?" dari
         # pengertian yang sama dengan fallback — tanpa mengubah prompt lain.
         # Deteksi definisi pakai teks yang sudah dinormalisasi tiponya.
         _glossary_hits = _match_glossary(normalize_typos(message)) if _is_definition_question(normalize_typos(message)) else []
@@ -2413,7 +2412,7 @@ class AIOrchestrator:
             yield from self._chunk_sentences(local_resp)
             return
 
-        # Provider OpenAI-compatible (NVIDIA/Groq/DeepSeek): satu panggilan
+        # Provider OpenAI-compatible (NVIDIA/Groq): satu panggilan
         # non-streaming, lalu hasilnya di-chunk seperti pola REST Gemini
         # (tanpa SDK) di bawah.
         _provider = _get_provider(db)
@@ -2557,7 +2556,7 @@ class AIOrchestrator:
             self._save_history(user_id, message, local_resp, db)
             return local_resp
 
-        # 4a. Provider OpenAI-compatible (NVIDIA/Groq/DeepSeek): satu
+        # 4a. Provider OpenAI-compatible (NVIDIA/Groq): satu
         # panggilan dengan prompt rakitan yang sama seperti Gemini. Gagal
         # apa pun (kunci kosong, endpoint mati, respons kosong) ->
         # fallback lokal, tidak pernah 500.
