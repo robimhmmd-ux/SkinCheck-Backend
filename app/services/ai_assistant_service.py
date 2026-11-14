@@ -482,8 +482,8 @@ class ContextBuilder:
                 overall_status = "Perlu Perhatian Ekstra"
 
             averages_section = (
-                f"2. RERATA KONDISI KULIT DARI SEMUA SCAN YANG DIANALISIS (HANYA UNTUK PERTANYAAN RATA-RATA/TREN):\n"
-                f"   [PENTING: Angka-angka di bawah ini adalah RATA-RATA dari semua scan yang dianalisis — BUKAN kondisi kulit pengguna saat ini. Pakai bagian ini HANYA kalau pengguna secara eksplisit menanyakan rata-rata/rerata/tren (misal 'berapa rata-rata skor saya'). Pertanyaan soal kondisi kulit saat ini ('kondisi kulit saya', 'cenderung ke apa', 'lebih ke arah mana', 'fokus utama') WAJIB dijawab dari bagian 3 di bawah, bukan dari rerata ini. Nilai rerata 5 parameter kondisi kulit di bawah WAJIB dijawab dalam satuan PERSEN %]:\n"
+                f"2. RERATA KONDISI KULIT DARI SEMUA SCAN YANG DIANALISIS:\n"
+                f"   [PENTING: Angka-angka di bawah ini adalah RATA-RATA dari semua scan yang dianalisis — SAMA dengan yang tampil di dashboard (bagian 3). Rerata ini adalah kondisi kulit pengguna saat ini menurut dashboard: satu scan bisa outlier, jadi fokus perawatan ditentukan dari rerata, bukan dari satu scan terakhir. Nilai rerata 5 parameter kondisi kulit di bawah WAJIB dijawab dalam satuan PERSEN %]:\n"
                 f"   • Rerata Jerawat (Acne): {avg_acne}% (Status: {acne_status})\n"
                 f"   • Rerata Minyak (Oily): {avg_oily}% (Status: {oily_status})\n"
                 f"   • Rerata Kekeringan (Dryness): {avg_dry}% (Status: {dry_status})\n"
@@ -495,11 +495,15 @@ class ContextBuilder:
         else:
             avg_acne = avg_oily = avg_dry = avg_spots = avg_wrinkles = avg_overall = 0
             averages_section = (
-                f"2. RERATA KONDISI KULIT DARI SEMUA SCAN YANG DIANALISIS (HANYA UNTUK PERTANYAAN RATA-RATA/TREN):\n"
+                f"2. RERATA KONDISI KULIT DARI SEMUA SCAN YANG DIANALISIS:\n"
                 f"   Belum ada riwayat scan wajah yang selesai dianalisis. Total pemindaian: {total_scans} kali."
             )
 
-        # Latest analysed scan: one query (newest scan that has an analysis).
+        # Scan terakhir yang sudah dianalisis: hanya dipakai untuk WAKTU
+        # pemindaian terakhir ("kapan terakhir saya scan"). Skor kondisi
+        # + dominan di bagian 3 ini diambil dari RATA-RATA (bagian 2),
+        # bukan dari scan terakhir — dashboard menampilkan rata-rata, dan
+        # satu scan bisa outlier (2026-11-14, keputusan pemilik produk).
         latest_row = (
             db.query(SkinScan, AnalysisResult)
             .join(AnalysisResult, AnalysisResult.skin_scan_id == SkinScan.id)
@@ -508,39 +512,37 @@ class ContextBuilder:
             .first()
         )
         if latest_row:
-            latest_scan, latest_analysis = latest_row
-            # Skor scan terakhir ditulis 1 desimal (72.9), sama seperti
-            # dashboard — int() sebelumnya memotong jadi 72, jadi LLM
-            # tidak mungkin menjawab 72.9% walau diinstruksikan begitu.
-            l_ov = round(float(latest_analysis.overall_score or 0), 1)
-            l_ac = round(float(latest_analysis.acne_score or 0), 1)
-            l_oi = round(float(latest_analysis.oily_skin_score or 0), 1)
-            l_dr = round(float(latest_analysis.dry_skin_score or 0), 1)
-            l_sp = round(float(latest_analysis.dark_spots_score if latest_analysis.dark_spots_score is not None and latest_analysis.dark_spots_score > 0 else (latest_analysis.hyperpigmentation_score or 0)), 1)
-            l_wr = round(float(latest_analysis.wrinkles_score if latest_analysis.wrinkles_score is not None and latest_analysis.wrinkles_score > 0 else (latest_analysis.texture_score or 0)), 1)
+            latest_scan, _latest_analysis = latest_row
             _wib = _to_wib(latest_scan.created_at)
             l_time = _wib.strftime("%d %B %Y, %H:%M WIB") if _wib else "-"
+            last_scan_line = f"   • Terakhir scan: {l_time} (Scan #{latest_scan.id})\n"
+        else:
+            last_scan_line = ""
+        if analyzed_count > 0:
+            # Skor rata-rata ditulis 1 desimal (67.8), sama seperti
+            # dashboard — int() sebelumnya memotong jadi 67, jadi LLM
+            # tidak mungkin menjawab 67.8% walau diinstruksikan begitu.
             _dom = _dominant_condition_for_scores({
-                "acne": l_ac, "dry": l_dr, "oily": l_oi,
-                "dark_spots": l_sp, "wrinkles": l_wr,
+                "acne": avg_acne, "dry": avg_dry, "oily": avg_oily,
+                "dark_spots": avg_spots, "wrinkles": avg_wrinkles,
             })
             _dom_label, _dom_value = _dom[1], _dom[3]
 
             latest_scan_section = (
-                f"3. KONDISI KULIT TERKINI — sesuai yang tampil di dashboard (dari scan terakhir yang dianalisis):\n"
-                f"   [PENTING: Bagian ini adalah KONDISI KULIT SAAT INI pengguna — sama seperti panel 'Tingkat 5 Kondisi Wajah' di dashboard. Pertanyaan 'kondisi kulit saya / cenderung ke apa / lebih ke arah mana / fokus utama / masalah utama' WAJIB dijawab dari angka-angka di bagian ini, BUKAN dari rerata di bagian 2. Tulis skor persis seperti di bawah ini, JANGAN dibulatkan (misal 72.9% tetap 72.9%, bukan 72%).]\n"
-                f"   • Waktu Pemeriksaan: {l_time} (Scan #{latest_scan.id})\n"
-                f"   • Skor Kesehatan Keseluruhan: {l_ov}/100\n"
-                f"   • Jerawat & Inflamasi (Acne): {l_ac}%\n"
-                f"   • Tingkat Sebum / Minyak (Oily): {l_oi}%\n"
-                f"   • Kekeringan Kulit (Dryness): {l_dr}%\n"
-                f"   • Noda Hitam & Flek (Dark Spots): {l_sp}%\n"
-                f"   • Garis Halus & Tekstur (Wrinkles): {l_wr}%\n"
-                f"   • Kondisi dominan saat ini: {_dom_label} ({_dom_value}%) — kondisi dengan skor tertinggi di scan terakhir ini"
+                f"3. KONDISI KULIT SAAT INI — sesuai yang tampil di dashboard (RATA-RATA dari {analyzed_count} scan yang dianalisis):\n"
+                f"   [PENTING: Bagian ini adalah KONDISI KULIT SAAT INI pengguna — sama seperti panel 'Tingkat 5 Kondisi Wajah' di dashboard. Angkanya adalah RATA-RATA dari semua scan yang dianalisis, BUKAN satu scan terakhir. Pertanyaan 'kondisi kulit saya / cenderung ke apa / lebih ke arah mana / fokus utama / masalah utama' WAJIB dijawab dari angka-angka di bagian ini. Tulis skor persis seperti di bawah ini, JANGAN dibulatkan (misal 67.8% tetap 67.8%, bukan 68%).]\n"
+                f"{last_scan_line}"
+                f"   • Skor Kesehatan Keseluruhan (rata-rata): {avg_overall}/100\n"
+                f"   • Jerawat & Inflamasi (Acne): {avg_acne}%\n"
+                f"   • Tingkat Sebum / Minyak (Oily): {avg_oily}%\n"
+                f"   • Kekeringan Kulit (Dryness): {avg_dry}%\n"
+                f"   • Noda Hitam & Flek (Dark Spots): {avg_spots}%\n"
+                f"   • Garis Halus & Tekstur (Wrinkles): {avg_wrinkles}%\n"
+                f"   • Kondisi dominan saat ini: {_dom_label} ({_dom_value}%) — kondisi dengan skor rata-rata tertinggi"
             )
         else:
             latest_scan_section = (
-                "3. KONDISI KULIT TERKINI — sesuai yang tampil di dashboard (dari scan terakhir yang dianalisis):\n"
+                "3. KONDISI KULIT SAAT INI — sesuai yang tampil di dashboard (RATA-RATA dari semua scan yang dianalisis):\n"
                 "   Belum ada scan yang selesai dianalisis."
             )
 
@@ -588,7 +590,7 @@ class ContextBuilder:
             f"PANDUAN MENJAWAB SEPERTI ASISTEN PRIBADI TERPERCAYA (LUVENNA):\n"
             f"- Jawab to the point, padat, dan ramah langsung ke inti pertanyaan (maksimal 1-2 kalimat).\n"
             f"- HANYA JAWAB PARAMETER YANG DITANYAKAN: Jika ditanya jerawat, hanya jawab jerawat (jangan jelaskan minyak/kondisi lain yang tidak ditanyakan).\n"
-            f"- KONDISI KULIT SAAT INI = SCAN TERAKHIR (bagian 3): pertanyaan 'kondisi kulit saya / cenderung ke apa / lebih ke arah mana / fokus utama / masalah utama' dijawab dari scan terakhir yang dianalisis, BUKAN dari rerata. Rerata (bagian 2) HANYA untuk pertanyaan rata-rata/tren yang eksplisit.\n"
+            f"- KONDISI KULIT SAAT INI = RATA-RATA (bagian 3, sama dengan dashboard): pertanyaan 'kondisi kulit saya / cenderung ke apa / lebih ke arah mana / fokus utama / masalah utama' dijawab dari RATA-RATA semua scan yang dianalisis. Satu scan terakhir HANYA untuk pertanyaan soal scan terakhir itu sendiri ('hasil scan terakhir', 'kapan terakhir saya scan').\n"
             f"- Tulis skor persis seperti di konteks, JANGAN dibulatkan (72.9% tetap 72.9%, bukan 72%).\n"
             f"- JANGAN MENYAPA DI AWAL RESPON (tanpa 'Halo', 'Hai', dsb.).\n"
             f"- Parameter rerata jerawat, minyak, kekeringan, noda hitam, dan garis halus WAJIB dijawab dalam format PERSEN (%) sama persis dengan angka di atas (misal '{avg_acne}%'). Dilarang menggunakan pecahan koma desimal mentah (seperti 0.15)."
@@ -976,10 +978,10 @@ CUSTOMER_SYSTEM_PROMPT = """Nama kamu adalah Luvenna (Ven), asisten pribadi untu
    - Setelah menjawab, tawarkan saran dengan kalimat seperti "Mau aku saranin perawatannya?" — JANGAN langsung memberikan sarannya di jawaban yang sama.
    - Berikan saran perawatan atau rekomendasi produk HANYA kalau pengguna memintanya secara eksplisit (misal "kasih saran", "rekomendasi produk", "cara mengatasi").
 
-9. KONDISI KULIT SAAT INI = SCAN TERAKHIR:
-   - Kalau pengguna bertanya soal kondisi kulitnya saat ini ("kondisi kulit saya", "cenderung ke apa", "lebih ke arah mana", "fokus utama", "masalah utama"), jawab dari SCAN TERAKHIR yang dianalisis (bagian "KONDISI KULIT TERKINI" di data pengguna) — BUKAN dari rerata.
-   - Rerata semua scan HANYA dipakai kalau pengguna secara eksplisit menanyakan rata-rata/rerata/tren.
-   - Tulis skor persis seperti di data (misal 72.9%), JANGAN dibulatkan jadi 72%.
+9. KONDISI KULIT SAAT INI = RATA-RATA (SAMA DENGAN DASHBOARD):
+   - Kalau pengguna bertanya soal kondisi kulitnya saat ini ("kondisi kulit saya", "cenderung ke apa", "lebih ke arah mana", "fokus utama", "masalah utama"), jawab dari RATA-RATA semua scan yang dianalisis (bagian "KONDISI KULIT SAAT INI" di data pengguna) — sama seperti yang tampil di dashboard.
+   - Satu scan terakhir HANYA dipakai kalau pengguna secara eksplisit menanyakan scan terakhir itu sendiri ("hasil scan terakhir", "kapan terakhir saya scan").
+   - Tulis skor persis seperti di data (misal 67.8%), JANGAN dibulatkan jadi 68%.
 
 DATA DATABASE PRIBADI PENGGUNA (HANYA UNTUK USER INI):
 {user_context}
@@ -2920,6 +2922,49 @@ class AIOrchestrator:
                 return s, ar
         return None, None
 
+    def _average_condition_scores(self, db, user_id):
+        """Rata-rata 5 skor kondisi + overall dari SEMUA scan user yang
+        sudah dianalisis (1 desimal), + jumlah scan yang dianalisis.
+        Logika agregat sama dengan ContextBuilder.build_user_context
+        bagian 2 (func.avg + fallback dark spots -> hyperpigmentation,
+        wrinkles -> texture). Dipakai cabang 4c supaya jawaban kondisi
+        kulit sama dengan dashboard (rata-rata, bukan scan terakhir).
+        Mengembalikan (count, scores) atau (0, None) bila belum ada."""
+        dark_expr = case(
+            (AnalysisResult.dark_spots_score > 0, AnalysisResult.dark_spots_score),
+            else_=AnalysisResult.hyperpigmentation_score,
+        )
+        wr_expr = case(
+            (AnalysisResult.wrinkles_score > 0, AnalysisResult.wrinkles_score),
+            else_=AnalysisResult.texture_score,
+        )
+        agg = (
+            db.query(
+                func.count(AnalysisResult.id),
+                func.avg(AnalysisResult.acne_score),
+                func.avg(AnalysisResult.oily_skin_score),
+                func.avg(AnalysisResult.dry_skin_score),
+                func.avg(dark_expr),
+                func.avg(wr_expr),
+                func.avg(AnalysisResult.overall_score),
+            )
+            .join(SkinScan, AnalysisResult.skin_scan_id == SkinScan.id)
+            .filter(SkinScan.user_id == user_id, AnalysisResult.overall_score.isnot(None))
+            .first()
+        )
+        count = int(agg[0] or 0)
+        if count == 0:
+            return 0, None
+        scores = {
+            "acne": round(float(agg[1] or 0), 1),
+            "oily": round(float(agg[2] or 0), 1),
+            "dry": round(float(agg[3] or 0), 1),
+            "dark_spots": round(float(agg[4] or 0), 1),
+            "wrinkles": round(float(agg[5] or 0), 1),
+            "overall": round(float(agg[6] or 0), 1),
+        }
+        return count, scores
+
     def _is_own_skin_condition_question(self, msg_lower: str) -> bool:
         """Pertanyaan customer soal kondisi/kecenderungan kulitnya sendiri
         ('kulit saya cenderung ke apa', 'kondisi kulit saya gimana',
@@ -3655,24 +3700,20 @@ class AIOrchestrator:
             return "Belum ada riwayat hasil pemindaian wajah yang tersimpan di sistem."
 
         # 4c. Customer bertanya kondisi/kecenderungan kulitnya sendiri.
-        # (2026-11-13) "kulit saya cenderung ke apa" sebelumnya jatuh ke
-        # dokumen RAG generik ("Urutan Pemakaian Skincare Pagi" +
-        # "Hyaluronic Acid"), padahal dashboard jelas menunjukkan fokus
-        # utama dari scan terakhir user. Jawab dulu dari data scan user
-        # (kondisi dominan + skor), baru tawarkan saran — tanpa memberi
-        # sarannya di jawaban yang sama, kecuali user memang minta saran
-        # secara eksplisit.
+        # (2026-11-14) Jawab dari RATA-RATA semua scan yang dianalisis —
+        # sama dengan dashboard. Satu scan terakhir bisa outlier, jadi
+        # kondisi dominan + skor diambil dari rerata, bukan scan terakhir.
+        # Jawab dulu dari data scan user (kondisi dominan + skor), baru
+        # tawarkan saran — tanpa memberi sarannya di jawaban yang sama,
+        # kecuali user memang minta saran secara eksplisit.
         if user_id and self._is_own_skin_condition_question(msg_lower):
-            latest_scan, ar = self._latest_analysis(db, user_id)
-            if not ar:
+            count, scores = self._average_condition_scores(db, user_id)
+            if not scores:
                 return "Kamu belum ada scan yang berhasil dianalisis, jadi aku belum bisa baca kondisi kulitmu — mau scan dulu?"
-            scores = self._condition_scores(ar)
             dom_key, dom_label, dom_phrase, dom_value = self._dominant_condition(scores)
-            _wib = _to_wib(latest_scan.created_at) if latest_scan else None
-            when = _wib.strftime("%d %B %Y") if _wib else "-"
             if self._wants_advice(msg_lower):
                 return (
-                    f"Kulitmu cenderung {dom_phrase}. Di scan terakhir tanggal {when}, "
+                    f"Kulitmu cenderung {dom_phrase}. Rata-rata dari {count} scan, "
                     f"skor {dom_label.lower()}mu {dom_value}%. "
                     f"{self._condition_tip(dom_key, dom_value)}"
                 )
@@ -3682,7 +3723,7 @@ class AIOrchestrator:
                 f"dan kerutan {scores['wrinkles']}%"
             )
             return (
-                f"Kulitmu cenderung {dom_phrase}. Di scan terakhir tanggal {when}, "
+                f"Kulitmu cenderung {dom_phrase}. Rata-rata dari {count} scan, "
                 f"skor kulitmu: {score_line}. "
                 f"Mau aku saranin perawatannya?"
             )
