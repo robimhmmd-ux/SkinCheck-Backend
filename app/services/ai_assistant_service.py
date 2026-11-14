@@ -1129,6 +1129,38 @@ def _detect_provider_order(api_key: str):
     return order
 
 
+# ── Saringan model chat untuk auto-deteksi (2026-11-14) ──
+# Endpoint /models NVIDIA (juga Groq/DeepSeek) mengembalikan SEMUA model,
+# termasuk yang BUKAN model chat: embedding, reranker, deteksi video,
+# guardrail, kalibrasi, TTS/STT, dsb. Chatbot hanya memakai
+# /chat/completions, jadi daftar deteksi disaring ke model chat saja.
+# Sengaja pola PENGECUALIAN (bukan allowlist): model chat baru dari
+# provider tetap lolos tanpa perlu mengubah kode.
+_CHAT_MODEL_EXCLUDE_PATTERNS = (
+    "embed",      # embedding (mis. nvidia/embed-qa-4)
+    "rerank",     # reranker
+    "video",      # deteksi/generasi video (mis. ai-synthetic-video-detector)
+    "nemoguard",  # guardrail NVIDIA (mis. llama-3.1-nemoguard-8b-*)
+    "guard",      # guardrail/safety lain
+    "ising",      # kalibrasi (mis. ising-calibration-1.5-31b)
+    "cosmos",     # world model (mis. cosmos-reason2-8b)
+    "tts",        # text-to-speech
+    "transcri",   # transkripsi / speech-to-text
+    "whisper",    # STT (mis. whisper-large-v3-turbo)
+    "audio",      # model audio lain
+    "image",      # generasi gambar
+)
+
+
+def _is_chat_model(model_id: str) -> bool:
+    """True bila model_id terlihat seperti model chat (bisa dipakai di
+    /chat/completions): tidak mengandung pola non-chat di atas."""
+    mid = (model_id or "").strip().lower()
+    if not mid:
+        return False
+    return not any(p in mid for p in _CHAT_MODEL_EXCLUDE_PATTERNS)
+
+
 def _detect_models_url(provider: str, url_overrides=None) -> str:
     """URL list-model provider; override dipakai HANYA untuk tes lokal
     (stub) lewat env DETECT_<PROVIDER>_MODELS_URL — di production env
@@ -1179,10 +1211,13 @@ def detect_provider_from_key(api_key: str, timeout: float = _DETECT_TIMEOUT, url
                 and (m.get("name") or "").strip()
             ]
         else:
+            # Hanya model chat (bisa /chat/completions): embedding, video,
+            # guardrail, kalibrasi, TTS/STT, dsb. disaring di _is_chat_model.
             models = [
                 (item.get("id") or "").strip()
                 for item in data.get("data", [])
                 if (item.get("id") or "").strip()
+                and _is_chat_model(item.get("id") or "")
             ]
         if not models:
             last_error = f"{provider}: tidak ada model yang tersedia."
