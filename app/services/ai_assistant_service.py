@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import time
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Optional, List
 from sqlalchemy.orm import Session
@@ -142,6 +143,44 @@ def find_user_by_name(db: Session, msg_lower: str, role: str | None = None):
 # ─────────────────────────────────────────────────────────
 # 1. SAFETY & DOMAIN GUARDRAIL LAYER
 # ─────────────────────────────────────────────────────────
+
+# ── Konversi waktu DB (UTC naif) ke WIB untuk tampilan chatbot ──
+# created_at di DB disimpan dalam UTC tanpa info zona; semua waktu yang
+# ditampilkan chatbot ke user berlabel WIB, jadi harus +7 jam dulu.
+# (2026-11-14) Live Budi: scan 04:31 UTC tampil "04:31 WIB" — harusnya
+# 11:31 WIB. Jangan ubah _iso_utc/API (sudah benar); hanya format waktu
+# di jawaban chatbot yang dikonversi di sini.
+def _to_wib(dt):
+    """Naive UTC datetime -> WIB (UTC+7, tanpa DST). Datetime yang sudah
+    aware dikonversi via astimezone; None tetap None."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone(timedelta(hours=7)))
+    return dt + timedelta(hours=7)
+
+
+def _dominant_condition_for_scores(scores: dict):
+    """Kondisi dengan skor tertinggi (urutan acne, dry, oily, dark_spots,
+    wrinkles; strict >) — logika yang sama dengan 'Fokus Utama' di halaman
+    Riwayat. Satu sumber kebenaran: dipakai AIOrchestrator._dominant_condition
+    DAN ContextBuilder.build_user_context (staticmethod, tidak punya self)
+    supaya angka dominan di konteks jalur pintar sama persis dengan
+    jawaban fallback cabang 4c."""
+    order = [
+        ("acne", "Jerawat", "berjerawat"),
+        ("dry", "Kulit kering", "kering"),
+        ("oily", "Kulit berminyak", "berminyak"),
+        ("dark_spots", "Dark spots", "punya flek/noda hitam"),
+        ("wrinkles", "Kerutan", "punya kerutan"),
+    ]
+    best = None
+    for key, label, phrase in order:
+        v = scores.get(key, 0)
+        if best is None or v > best[3]:
+            best = (key, label, phrase, v)
+    return best  # (key, label, phrase, value)
+
 
 class SafetyLayer:
     """
@@ -443,8 +482,8 @@ class ContextBuilder:
                 overall_status = "Perlu Perhatian Ekstra"
 
             averages_section = (
-                f"2. KARTU & GRAFIK TREN RERATA KONDISI KULIT (SINKRON 100% DENGAN TAMPILAN DASHBOARD USER):\n"
-                f"   [PENTING: Nilai rerata 5 parameter kondisi kulit di bawah WAJIB dijawab dalam satuan PERSEN %]:\n"
+                f"2. RERATA KONDISI KULIT DARI SEMUA SCAN YANG DIANALISIS (HANYA UNTUK PERTANYAAN RATA-RATA/TREN):\n"
+                f"   [PENTING: Angka-angka di bawah ini adalah RATA-RATA dari semua scan yang dianalisis — BUKAN kondisi kulit pengguna saat ini. Pakai bagian ini HANYA kalau pengguna secara eksplisit menanyakan rata-rata/rerata/tren (misal 'berapa rata-rata skor saya'). Pertanyaan soal kondisi kulit saat ini ('kondisi kulit saya', 'cenderung ke apa', 'lebih ke arah mana', 'fokus utama') WAJIB dijawab dari bagian 3 di bawah, bukan dari rerata ini. Nilai rerata 5 parameter kondisi kulit di bawah WAJIB dijawab dalam satuan PERSEN %]:\n"
                 f"   • Rerata Jerawat (Acne): {avg_acne}% (Status: {acne_status})\n"
                 f"   • Rerata Minyak (Oily): {avg_oily}% (Status: {oily_status})\n"
                 f"   • Rerata Kekeringan (Dryness): {avg_dry}% (Status: {dry_status})\n"
@@ -456,7 +495,7 @@ class ContextBuilder:
         else:
             avg_acne = avg_oily = avg_dry = avg_spots = avg_wrinkles = avg_overall = 0
             averages_section = (
-                f"2. KARTU & GRAFIK TREN RERATA KONDISI KULIT (DASHBOARD USER):\n"
+                f"2. RERATA KONDISI KULIT DARI SEMUA SCAN YANG DIANALISIS (HANYA UNTUK PERTANYAAN RATA-RATA/TREN):\n"
                 f"   Belum ada riwayat scan wajah yang selesai dianalisis. Total pemindaian: {total_scans} kali."
             )
 
@@ -470,26 +509,40 @@ class ContextBuilder:
         )
         if latest_row:
             latest_scan, latest_analysis = latest_row
-            l_ov = int(latest_analysis.overall_score or 0)
-            l_ac = int(latest_analysis.acne_score or 0)
-            l_oi = int(latest_analysis.oily_skin_score or 0)
-            l_dr = int(latest_analysis.dry_skin_score or 0)
-            l_sp = int(latest_analysis.dark_spots_score if latest_analysis.dark_spots_score is not None and latest_analysis.dark_spots_score > 0 else (latest_analysis.hyperpigmentation_score or 0))
-            l_wr = int(latest_analysis.wrinkles_score if latest_analysis.wrinkles_score is not None and latest_analysis.wrinkles_score > 0 else (latest_analysis.texture_score or 0))
-            l_time = latest_scan.created_at.strftime("%d %B %Y, %H:%M WIB") if latest_scan.created_at else "-"
+            # Skor scan terakhir ditulis 1 desimal (72.9), sama seperti
+            # dashboard — int() sebelumnya memotong jadi 72, jadi LLM
+            # tidak mungkin menjawab 72.9% walau diinstruksikan begitu.
+            l_ov = round(float(latest_analysis.overall_score or 0), 1)
+            l_ac = round(float(latest_analysis.acne_score or 0), 1)
+            l_oi = round(float(latest_analysis.oily_skin_score or 0), 1)
+            l_dr = round(float(latest_analysis.dry_skin_score or 0), 1)
+            l_sp = round(float(latest_analysis.dark_spots_score if latest_analysis.dark_spots_score is not None and latest_analysis.dark_spots_score > 0 else (latest_analysis.hyperpigmentation_score or 0)), 1)
+            l_wr = round(float(latest_analysis.wrinkles_score if latest_analysis.wrinkles_score is not None and latest_analysis.wrinkles_score > 0 else (latest_analysis.texture_score or 0)), 1)
+            _wib = _to_wib(latest_scan.created_at)
+            l_time = _wib.strftime("%d %B %Y, %H:%M WIB") if _wib else "-"
+            _dom = _dominant_condition_for_scores({
+                "acne": l_ac, "dry": l_dr, "oily": l_oi,
+                "dark_spots": l_sp, "wrinkles": l_wr,
+            })
+            _dom_label, _dom_value = _dom[1], _dom[3]
 
             latest_scan_section = (
-                f"3. ANALISIS KONDISI KULIT TERAKHIR (LATEST SCAN PADA DASHBOARD USER):\n"
+                f"3. KONDISI KULIT TERKINI — sesuai yang tampil di dashboard (dari scan terakhir yang dianalisis):\n"
+                f"   [PENTING: Bagian ini adalah KONDISI KULIT SAAT INI pengguna — sama seperti panel 'Tingkat 5 Kondisi Wajah' di dashboard. Pertanyaan 'kondisi kulit saya / cenderung ke apa / lebih ke arah mana / fokus utama / masalah utama' WAJIB dijawab dari angka-angka di bagian ini, BUKAN dari rerata di bagian 2. Tulis skor persis seperti di bawah ini, JANGAN dibulatkan (misal 72.9% tetap 72.9%, bukan 72%).]\n"
                 f"   • Waktu Pemeriksaan: {l_time} (Scan #{latest_scan.id})\n"
                 f"   • Skor Kesehatan Keseluruhan: {l_ov}/100\n"
                 f"   • Jerawat & Inflamasi (Acne): {l_ac}%\n"
                 f"   • Tingkat Sebum / Minyak (Oily): {l_oi}%\n"
                 f"   • Kekeringan Kulit (Dryness): {l_dr}%\n"
                 f"   • Noda Hitam & Flek (Dark Spots): {l_sp}%\n"
-                f"   • Garis Halus & Tekstur (Wrinkles): {l_wr}%"
+                f"   • Garis Halus & Tekstur (Wrinkles): {l_wr}%\n"
+                f"   • Kondisi dominan saat ini: {_dom_label} ({_dom_value}%) — kondisi dengan skor tertinggi di scan terakhir ini"
             )
         else:
-            latest_scan_section = "3. ANALISIS KONDISI KULIT TERAKHIR:\n   Belum ada scan yang selesai dianalisis."
+            latest_scan_section = (
+                "3. KONDISI KULIT TERKINI — sesuai yang tampil di dashboard (dari scan terakhir yang dianalisis):\n"
+                "   Belum ada scan yang selesai dianalisis."
+            )
 
         # Recent 5 scans + their analyses in a single IN query (no per-scan query).
         recent_scans = (
@@ -513,7 +566,8 @@ class ContextBuilder:
         history_lines = []
         for sc in recent_scans:
             ar = analysis_by_scan.get(sc.id)
-            sc_date = sc.created_at.strftime("%d %b %Y") if sc.created_at else "-"
+            _sc_wib = _to_wib(sc.created_at)
+            sc_date = _sc_wib.strftime("%d %b %Y") if _sc_wib else "-"
             sc_score = f"{int(ar.overall_score)}/100" if ar and ar.overall_score is not None else "-"
             history_lines.append(f"   • Scan #{sc.id} | {sc_date} | Skor: {sc_score} | Status: {sc.status.capitalize()}")
         history_str = "\n".join(history_lines) if history_lines else "   (Belum ada riwayat)"
@@ -534,6 +588,8 @@ class ContextBuilder:
             f"PANDUAN MENJAWAB SEPERTI ASISTEN PRIBADI TERPERCAYA (LUVENNA):\n"
             f"- Jawab to the point, padat, dan ramah langsung ke inti pertanyaan (maksimal 1-2 kalimat).\n"
             f"- HANYA JAWAB PARAMETER YANG DITANYAKAN: Jika ditanya jerawat, hanya jawab jerawat (jangan jelaskan minyak/kondisi lain yang tidak ditanyakan).\n"
+            f"- KONDISI KULIT SAAT INI = SCAN TERAKHIR (bagian 3): pertanyaan 'kondisi kulit saya / cenderung ke apa / lebih ke arah mana / fokus utama / masalah utama' dijawab dari scan terakhir yang dianalisis, BUKAN dari rerata. Rerata (bagian 2) HANYA untuk pertanyaan rata-rata/tren yang eksplisit.\n"
+            f"- Tulis skor persis seperti di konteks, JANGAN dibulatkan (72.9% tetap 72.9%, bukan 72%).\n"
             f"- JANGAN MENYAPA DI AWAL RESPON (tanpa 'Halo', 'Hai', dsb.).\n"
             f"- Parameter rerata jerawat, minyak, kekeringan, noda hitam, dan garis halus WAJIB dijawab dalam format PERSEN (%) sama persis dengan angka di atas (misal '{avg_acne}%'). Dilarang menggunakan pecahan koma desimal mentah (seperti 0.15)."
         )
@@ -602,7 +658,7 @@ class ContextBuilder:
                 )
 
             scan_list_str = "\n".join([
-                f"  • Scan #{s.id} | Pemilik: {_owner_names.get(s.user_id, f'User #{s.user_id}')} (User ID: #{s.user_id}) | Status: {s.status} | Kualitas: {s.image_quality_score or '-'} | Waktu: {s.created_at.strftime('%d-%m-%Y %H:%M')} | {_scan_scores_str(s)}"
+                f"  • Scan #{s.id} | Pemilik: {_owner_names.get(s.user_id, f'User #{s.user_id}')} (User ID: #{s.user_id}) | Status: {s.status} | Kualitas: {s.image_quality_score or '-'} | Waktu: {(_to_wib(s.created_at).strftime('%d-%m-%Y %H:%M') if s.created_at else '-')} WIB | {_scan_scores_str(s)}"
                 for s in all_scans
             ])
 
@@ -919,6 +975,11 @@ CUSTOMER_SYSTEM_PROMPT = """Nama kamu adalah Luvenna (Ven), asisten pribadi untu
    - Kalau pengguna bertanya tentang kondisi kulitnya (skor, kondisi dominan, hasil scan), jawab dulu pertanyaannya secara to-the-point dari data scan-nya.
    - Setelah menjawab, tawarkan saran dengan kalimat seperti "Mau aku saranin perawatannya?" — JANGAN langsung memberikan sarannya di jawaban yang sama.
    - Berikan saran perawatan atau rekomendasi produk HANYA kalau pengguna memintanya secara eksplisit (misal "kasih saran", "rekomendasi produk", "cara mengatasi").
+
+9. KONDISI KULIT SAAT INI = SCAN TERAKHIR:
+   - Kalau pengguna bertanya soal kondisi kulitnya saat ini ("kondisi kulit saya", "cenderung ke apa", "lebih ke arah mana", "fokus utama", "masalah utama"), jawab dari SCAN TERAKHIR yang dianalisis (bagian "KONDISI KULIT TERKINI" di data pengguna) — BUKAN dari rerata.
+   - Rerata semua scan HANYA dipakai kalau pengguna secara eksplisit menanyakan rata-rata/rerata/tren.
+   - Tulis skor persis seperti di data (misal 72.9%), JANGAN dibulatkan jadi 72%.
 
 DATA DATABASE PRIBADI PENGGUNA (HANYA UNTUK USER INI):
 {user_context}
@@ -2722,21 +2783,10 @@ class AIOrchestrator:
         }
 
     def _dominant_condition(self, scores: dict):
-        """Kondisi dengan skor tertinggi (urutan SCORE_KEYS, strict >) —
-        logika yang sama dengan 'Fokus Utama' di halaman Riwayat."""
-        order = [
-            ("acne", "Jerawat", "berjerawat"),
-            ("dry", "Kulit kering", "kering"),
-            ("oily", "Kulit berminyak", "berminyak"),
-            ("dark_spots", "Dark spots", "punya flek/noda hitam"),
-            ("wrinkles", "Kerutan", "punya kerutan"),
-        ]
-        best = None
-        for key, label, phrase in order:
-            v = scores.get(key, 0)
-            if best is None or v > best[3]:
-                best = (key, label, phrase, v)
-        return best  # (key, label, phrase, value)
+        """Kondisi dengan skor tertinggi — delegasi ke helper modul
+        _dominant_condition_for_scores (satu sumber kebenaran dengan
+        ContextBuilder.build_user_context)."""
+        return _dominant_condition_for_scores(scores)
 
     def _care_focus_answer(self, db, msg_lower: str) -> str:
         """Fokus perawatan per akun (admin). Sumber: (1) kondisi dominan
@@ -3567,7 +3617,8 @@ class AIOrchestrator:
                 latest = db.query(SkinScan).filter(SkinScan.user_id == user_id).order_by(desc(SkinScan.created_at)).first()
                 if not latest:
                     return "Kamu belum pernah scan."
-                when = latest.created_at.strftime("%d %B %Y, %H:%M WIB") if latest.created_at else "-"
+                _wib = _to_wib(latest.created_at)
+                when = _wib.strftime("%d %B %Y, %H:%M WIB") if _wib else "-"
                 ar = db.query(AnalysisResult).filter(AnalysisResult.skin_scan_id == latest.id).first()
                 if ar and ar.overall_score is not None:
                     return f"Terakhir kamu scan tanggal {when}, skor kesehatan kulitmu {int(ar.overall_score)}/100."
@@ -3577,7 +3628,8 @@ class AIOrchestrator:
             for u_scan in u_scans:
                 ar = db.query(AnalysisResult).filter(AnalysisResult.skin_scan_id == u_scan.id).first()
                 if ar and ar.overall_score is not None:
-                    l_time = u_scan.created_at.strftime("%d %B %Y, %H:%M WIB") if u_scan.created_at else "-"
+                    _wib = _to_wib(u_scan.created_at)
+                    l_time = _wib.strftime("%d %B %Y, %H:%M WIB") if _wib else "-"
                     l_ov = int(ar.overall_score or 0)
                     l_ac = int(ar.acne_score or 0)
                     l_oi = int(ar.oily_skin_score or 0)
@@ -3616,7 +3668,8 @@ class AIOrchestrator:
                 return "Kamu belum ada scan yang berhasil dianalisis, jadi aku belum bisa baca kondisi kulitmu — mau scan dulu?"
             scores = self._condition_scores(ar)
             dom_key, dom_label, dom_phrase, dom_value = self._dominant_condition(scores)
-            when = latest_scan.created_at.strftime("%d %B %Y") if latest_scan and latest_scan.created_at else "-"
+            _wib = _to_wib(latest_scan.created_at) if latest_scan else None
+            when = _wib.strftime("%d %B %Y") if _wib else "-"
             if self._wants_advice(msg_lower):
                 return (
                     f"Kulitmu cenderung {dom_phrase}. Di scan terakhir tanggal {when}, "
